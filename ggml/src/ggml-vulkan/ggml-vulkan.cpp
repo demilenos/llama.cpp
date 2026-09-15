@@ -415,7 +415,6 @@ static ggml_backend_buffer_type_i ggml_backend_vk_buffer_type_interface = {
     /* .is_host          = */ NULL,
 };
 
-class vk_memory_logger;
 class vk_perf_logger;
 static void ggml_vk_destroy_buffer(vk_buffer& buf);
 static void ggml_vk_synchronize(ggml_backend_vk_context * ctx);
@@ -1180,8 +1179,6 @@ struct vk_device_struct {
     vk_pipeline pipeline_conv2d_dw_cwhn_f32, pipeline_conv2d_dw_cwhn_f16_f32;
 
     std::map<vk_fa_pipeline_state, vk_pipeline> pipeline_flash_attn_f32_f16;
-    std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> flash_attn_logged_shapes;
-
     std::map<std::pair<uint32_t, uint32_t>, vk_pipeline> pipeline_fa_mask_opt;
 
     vk_pipeline pipeline_fa_sparse_compact;
@@ -1207,8 +1204,6 @@ struct vk_device_struct {
     bool disable_host_visible_vidmem;
     bool allow_sysmem_fallback;
     bool disable_graph_optimize;
-
-    std::unique_ptr<vk_memory_logger> memory_logger;
 
     ~vk_device_struct() {
         VK_LOG_DEBUG("destroy device " << name);
@@ -2308,53 +2303,10 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested = null
 static void ggml_pipeline_allocate_descriptor_sets(ggml_backend_vk_context * ctx);
 static bool ggml_vk_intel_windows_driver_in_range(uint32_t driver_version, uint32_t lower_major, uint32_t lower_minor, uint32_t upper_major, uint32_t upper_minor);
 
-static bool vk_memory_logger_enabled = false;
-
-#define VK_LOG_MEMORY(msg) if (vk_memory_logger_enabled) { std::cerr << "ggml_vulkan memory: " << msg << std::endl; }
-
-static std::string format_size(size_t size) {
-    const size_t kib = 1024;
-    const size_t mib = kib * 1024;
-    const size_t gib = mib * 1024;
-
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(2);
-
-    if (size >= gib) {
-        oss << static_cast<double>(size) / gib << " GiB";
-    } else if (size >= mib) {
-        oss << static_cast<double>(size) / mib << " MiB";
-    } else if (size >= kib) {
-        oss << static_cast<double>(size) / kib << " KiB";
-    } else {
-        oss << size << " B";
-    }
-
-    return oss.str();
-}
-
-class vk_memory_logger {
-public:
-    vk_memory_logger(): total_device(0), total_host(0) {}
-    void log_allocation(vk_buffer_ref buf_ref, size_t size);
-    void log_deallocation(vk_buffer_ref buf_ref);
-
-private:
-    std::map<vk::Buffer, size_t> allocations; // Track allocations
-    size_t total_device;
-    size_t total_host;
-    static std::mutex log_mutex;
-};
-
-std::mutex vk_memory_logger::log_mutex;
-
 static bool vk_perf_logger_enabled = false;
 static bool vk_perf_logger_concurrent = false;
-static bool vk_enable_sync_logger = false;
 // number of calls between perf logger prints
 static uint32_t vk_perf_logger_frequency = 1;
-static std::string vk_pipeline_stats_filter;
-
 static uint64_t ggml_vk_get_node_flops(const ggml_tensor * node) {
     if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
         const uint64_t m     = node->ne[0];
@@ -2835,40 +2787,6 @@ struct ggml_backend_vk_buffer_context {
         ggml_vk_destroy_buffer(dev_buffer);
     }
 };
-
-void vk_memory_logger::log_allocation(vk_buffer_ref buf_ref, size_t size) {
-    if (!vk_memory_logger_enabled) {
-        return;
-    }
-    std::lock_guard<std::mutex> guard(log_mutex);
-    vk_buffer buf = buf_ref.lock();
-    const bool device = bool(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
-    const std::string type = device ? "device" : "host";
-    allocations[buf->buffer] = size;
-    total_device += device ? size : 0;
-    total_host += device ? 0 : size;
-    VK_LOG_MEMORY(buf->device->name << ": +" << format_size(size) << " " << type << " at " << buf->buffer << ". Total device: " << format_size(total_device) << ", total host: " << format_size(total_host));
-}
-
-void vk_memory_logger::log_deallocation(vk_buffer_ref buf_ref) {
-    if (buf_ref.expired() || buf_ref.lock()->size == 0 || !vk_memory_logger_enabled) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> guard(log_mutex);
-    vk_buffer buf = buf_ref.lock();
-    const bool device = bool(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
-    std::string type = device ? "device" : "host";
-    auto it = allocations.find(buf->buffer);
-    if (it != allocations.end()) {
-        total_device -= device ? it->second : 0;
-        total_host -= device ? 0 : it->second;
-        VK_LOG_MEMORY(buf->device->name << ": -" << format_size(it->second) << " " << type << " at " << buf->buffer << ". Total device: " << format_size(total_device) << ", total host: " << format_size(total_host));
-        allocations.erase(it);
-    } else {
-        VK_LOG_MEMORY("ERROR " << buf->device->name << ": Attempted to deallocate unknown " << type << " memory at " << buf->buffer);
-    }
-}
 
 struct vk_instance_t {
     vk::Instance instance;
@@ -3371,31 +3289,7 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
 
         auto statistics = device->device.getPipelineExecutableStatisticsKHR(executableInfo);
 
-        bool print_stats = !vk_pipeline_stats_filter.empty() &&
-                           pipeline->name.find(vk_pipeline_stats_filter) != std::string::npos;
-        if (print_stats) {
-            std::cerr << "ggml_vulkan: pipeline stats for " << pipeline->name << ":" << std::endl;
-        }
-
         for (auto & s : statistics) {
-            if (print_stats) {
-                std::cerr << "ggml_vulkan:   " << s.name.data() << ": ";
-                switch (s.format) {
-                    case vk::PipelineExecutableStatisticFormatKHR::eBool32:
-                        std::cerr << (s.value.b32 ? "true" : "false");
-                        break;
-                    case vk::PipelineExecutableStatisticFormatKHR::eInt64:
-                        std::cerr << s.value.i64;
-                        break;
-                    case vk::PipelineExecutableStatisticFormatKHR::eUint64:
-                        std::cerr << s.value.u64;
-                        break;
-                    case vk::PipelineExecutableStatisticFormatKHR::eFloat64:
-                        std::cerr << s.value.f64;
-                        break;
-                }
-                std::cerr << std::endl;
-            }
             // "Register Count" is reported by NVIDIA drivers.
             if (strcmp(s.name, "Register Count") == 0) {
                 VK_LOG_DEBUG(pipeline->name << " " << s.name << ": " << s.value.u64 << " registers");
@@ -3915,8 +3809,6 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
         buf->bda_addr = device->device.getBufferAddress(addressInfo);
     }
 
-    device->memory_logger->log_allocation(buf, size);
-
     return buf;
 }
 
@@ -3972,10 +3864,6 @@ static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size, bo
 static void ggml_vk_destroy_buffer(vk_buffer& buf) {
     if (buf == nullptr) {
         return;
-    }
-
-    if (buf->device != nullptr) {
-        buf->device->memory_logger->log_deallocation(buf);
     }
 
     buf.reset();
@@ -6685,8 +6573,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
         vk_device device = std::make_shared<vk_device_struct>();
         vk_instance.devices[idx] = device;
 
-        device->memory_logger = std::unique_ptr<vk_memory_logger>(new vk_memory_logger());
-
         size_t dev_num = vk_instance.device_indices[idx];
 
         std::vector<vk::PhysicalDevice> physical_devices = vk_instance.instance.enumeratePhysicalDevices();
@@ -7947,12 +7833,6 @@ static void ggml_vk_instance_init() {
 
     vk_perf_logger_enabled = getenv("GGML_VK_PERF_LOGGER") != nullptr;
     vk_perf_logger_concurrent = getenv("GGML_VK_PERF_LOGGER_CONCURRENT") != nullptr;
-    vk_enable_sync_logger = getenv("GGML_VK_SYNC_LOGGER") != nullptr;
-    vk_memory_logger_enabled = getenv("GGML_VK_MEMORY_LOGGER") != nullptr;
-    const char* GGML_VK_PIPELINE_STATS = getenv("GGML_VK_PIPELINE_STATS");
-    if (GGML_VK_PIPELINE_STATS != nullptr) {
-        vk_pipeline_stats_filter = GGML_VK_PIPELINE_STATS;
-    }
     const char* GGML_VK_PERF_LOGGER_FREQUENCY = getenv("GGML_VK_PERF_LOGGER_FREQUENCY");
 
     if (GGML_VK_PERF_LOGGER_FREQUENCY != nullptr) {
@@ -8380,7 +8260,6 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
 }
 
 static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
-    VK_LOG_MEMORY("ggml_vk_host_malloc(" << size << ")");
     vk_buffer buf = ggml_vk_create_buffer(device, size,
         {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
          vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
@@ -8403,7 +8282,6 @@ static void ggml_vk_host_free(vk_device& device, void* ptr) {
     if (ptr == nullptr) {
         return;
     }
-    VK_LOG_MEMORY("ggml_vk_host_free(" << ptr << ")");
     std::lock_guard<std::shared_mutex> guard(device->pinned_memory_mutex);
 
     vk_buffer buf;
@@ -8773,7 +8651,6 @@ static void deferred_memset(void * dst, uint32_t val, size_t size, std::vector<v
 
 static void ggml_vk_ensure_sync_staging_buffer(vk_device& device, size_t size) {
     if (device->sync_staging == nullptr || device->sync_staging->size < size) {
-        VK_LOG_MEMORY("ggml_vk_ensure_sync_staging_buffer(" << size << ")");
         ggml_vk_destroy_buffer(device->sync_staging);
         device->sync_staging = ggml_vk_create_buffer_check(device, size,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
@@ -8783,7 +8660,6 @@ static void ggml_vk_ensure_sync_staging_buffer(vk_device& device, size_t size) {
 
 static void ggml_vk_ensure_sync_staging_buffer(ggml_backend_vk_context * ctx, size_t size) {
     if (ctx->sync_staging == nullptr || ctx->sync_staging->size < size) {
-        VK_LOG_MEMORY("ggml_vk_ensure_sync_staging_buffer(" << size << ")");
         ggml_vk_destroy_buffer(ctx->sync_staging);
         ctx->sync_staging = ggml_vk_create_buffer_check(ctx->device, size,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
@@ -11590,31 +11466,6 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
         ? (gqa_ratio > 1 ? split_k * workgroups_x * pipeline->wg_denoms[0] : Tr * split_k * pipeline->wg_denoms[0])
         : (gqa_ratio > 1 ? workgroups_x * pipeline->wg_denoms[0] : workgroups_x);
 
-    bool log_shape = false;
-    {
-        std::lock_guard<std::mutex> guard(ctx->device->compile_mutex);
-        log_shape = ctx->device->flash_attn_logged_shapes.emplace(
-            (uint32_t) neq1, KV, (uint32_t) neq2, (uint32_t) nek2, HSK).second;
-    }
-    if (log_shape) {
-        const bool fa_mmq = tuning_params.path == FA_SCALAR &&
-                            ggml_vk_fa_scalar_uses_mmq(ctx->device, k_type_eff, v_type_eff);
-        const int integer_dot_supported = ctx->device->integer_dot_product ? 1 : 0;
-        const int integer_dot_used = fa_mmq ? 1 : 0;
-        fprintf(stderr,
-                "vulkan FA: Q=%lld KV=%lld H=%lld Hkv=%lld D=%lld "
-                "pipeline=%s wg=(%u,%u,%u) nwg=(%u,%u,%u) "
-                "kv_tile=%u kv_partitions=%u heads_per_wg=%u gqa_reuse=%u "
-                "K_type=%s V_type=%s MMQ=%d FA_MMQ_MIXED=%d "
-                "integer_dot_supported=%d integer_dot_used=%d\n",
-                (long long) neq1, (long long) KV, (long long) neq2, (long long) nek2, (long long) HSK,
-                pipeline->name.c_str(), tuning_params.workgroup_size, 1u, 1u,
-                dispatch_x, workgroups_y, workgroups_z,
-                Bc, split_k, gqa_ratio, gqa_ratio,
-                ggml_type_name(k_type_eff), ggml_type_name(v_type_eff), fa_mmq ? 1 : 0, fa_mmq ? 1 : 0,
-                integer_dot_supported, integer_dot_used);
-    }
-
     // Reserve space for split_k temporaries. For each split x batch, we need to store the O matrix (D x ne1)
     // and the per-row m and L values (ne1 rows). We store all the matrices first, followed by the rows.
     // For matrices, the order is (inner to outer) [HSV, ne1, k, ne2, ne3].
@@ -11784,13 +11635,13 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
         vk_subbuffer split_k_buf = ggml_vk_subbuffer(ctx, ctx->prealloc_split_k, 0);
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
                                     {q_buf, k_buf, v_buf, mask_buf, sinks_buf, split_k_buf, mask_opt_buf, sparse_buf},
-                                    pc, { dispatch_x, workgroups_y, workgroups_z }, "FA_MAIN");
+                                    pc, { dispatch_x, workgroups_y, workgroups_z }, nullptr);
 
         ggml_vk_sync_buffers(ctx, subctx);
         const vk_op_flash_attn_split_k_reduce_push_constants pc2 = { HSV, (uint32_t)ne1, (uint32_t)ne2, (uint32_t)ne3, split_k, (sinks != nullptr) };
         ggml_vk_dispatch_pipeline(ctx, subctx, ctx->device->pipeline_flash_attn_split_k_reduce,
                                     {split_k_buf, sinks_buf, dst_buf},
-                                    pc2, { (uint32_t)ne1, HSV, (uint32_t)(ne2 * ne3) }, "FA_SPLIT_REDUCE");
+                                    pc2, { (uint32_t)ne1, HSV, (uint32_t)(ne2 * ne3) }, nullptr);
         ctx->prealloc_split_k_need_sync = true;
     } else {
         if (gqa_ratio > 1) {
@@ -11799,7 +11650,7 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
         }
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
                                     {q_buf, k_buf, v_buf, mask_buf, sinks_buf, dst_buf, mask_opt_buf, sparse_buf},
-                                    pc, { workgroups_x, workgroups_y, workgroups_z }, "FA_MAIN");
+                                    pc, { workgroups_x, workgroups_y, workgroups_z }, nullptr);
     }
 
     if (use_dequant_kv) {
@@ -16216,7 +16067,6 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_contex
     }
 
     if (ctx->prealloc_x == nullptr || (ctx->prealloc_size_x > 0 && ctx->prealloc_x->size < ctx->prealloc_size_x)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(x_size: " << ctx->prealloc_size_x << ")");
         // Resize buffer
         if (ctx->prealloc_x != nullptr) {
             ggml_vk_destroy_buffer(ctx->prealloc_x);
@@ -16224,7 +16074,6 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_contex
         ctx->prealloc_x = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_x);
     }
     if (ctx->prealloc_y == nullptr || (ctx->prealloc_size_y > 0 && ctx->prealloc_y->size < ctx->prealloc_size_y)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(y_size: " << ctx->prealloc_size_y << ")");
         // Resize buffer
         if (ctx->prealloc_y != nullptr) {
             ggml_vk_destroy_buffer(ctx->prealloc_y);
@@ -16235,7 +16084,6 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_contex
         ctx->prealloc_y_last_k_padded = false;
     }
     if (ctx->prealloc_split_k == nullptr || (ctx->prealloc_size_split_k > 0 && ctx->prealloc_split_k->size < ctx->prealloc_size_split_k)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(split_k_size: " << ctx->prealloc_size_split_k << ")");
         // Resize buffer
         if (ctx->prealloc_split_k != nullptr) {
             ggml_vk_destroy_buffer(ctx->prealloc_split_k);
@@ -16243,7 +16091,6 @@ static void ggml_vk_preallocate_buffers(ggml_backend_vk_context * ctx, vk_contex
         ctx->prealloc_split_k = ggml_vk_create_buffer_device(ctx->device, ctx->prealloc_size_split_k);
     }
     if (ctx->prealloc_add_rms_partials == nullptr || (ctx->prealloc_size_add_rms_partials > 0 && ctx->prealloc_add_rms_partials->size < ctx->prealloc_size_add_rms_partials)) {
-        VK_LOG_MEMORY("ggml_vk_preallocate_buffers(add_partials_size: " << ctx->prealloc_add_rms_partials << ")");
         // Resize buffer
         if (ctx->prealloc_add_rms_partials != nullptr) {
             ggml_vk_destroy_buffer(ctx->prealloc_add_rms_partials);
@@ -16350,9 +16197,6 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         }
 
         if (need_sync) {
-            if (vk_enable_sync_logger) {
-                std::cerr <<  "sync" << std::endl;
-            }
             ctx->unsynced_nodes_written.clear();
             ctx->unsynced_nodes_read.clear();
             ggml_vk_sync_buffers(ctx, compute_ctx);
@@ -16379,21 +16223,6 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
             }
         }
     }
-    if (vk_enable_sync_logger) {
-        for (int i = 0; i < ctx->num_additional_fused_ops + 1; ++i) {
-            auto *n = cgraph->nodes[node_idx + i];
-            std::cerr << node_idx + i << " " << ggml_op_name(n->op) << " " <<  n->name;
-            if (n->op == GGML_OP_GLU) {
-                std::cerr << " " << ggml_glu_op_name(ggml_get_glu_op(n)) << " " << (n->src[1] ? "split" : "single") << " ";
-            }
-            if (n->op == GGML_OP_ROPE) {
-                const int mode = ((const int32_t *) n->op_params)[2];
-                std::cerr << " rope mode: " << mode;
-            }
-            std::cerr << std::endl;
-        }
-    }
-
     // closed explicitly below, and by the destructor on the early returns
     ggml_vk_debug_label dbg(compute_ctx, cgraph, node_idx, ctx->num_additional_fused_ops);
 
@@ -16996,7 +16825,6 @@ static bool ggml_backend_buffer_is_vk(ggml_backend_buffer_t buffer) {
 }
 
 static void ggml_backend_vk_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    VK_LOG_MEMORY("ggml_backend_vk_buffer_free_buffer()");
     ggml_backend_vk_buffer_context * ctx = (ggml_backend_vk_buffer_context *)buffer->context;
     ggml_vk_destroy_buffer(ctx->dev_buffer);
     delete ctx;
@@ -17132,7 +16960,6 @@ static const char * ggml_backend_vk_buffer_type_name(ggml_backend_buffer_type_t 
 }
 
 static ggml_backend_buffer_t ggml_backend_vk_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
-    VK_LOG_MEMORY("ggml_backend_vk_buffer_type_alloc_buffer(" << size << ")");
     ggml_backend_vk_buffer_type_context * ctx = (ggml_backend_vk_buffer_type_context *) buft->context;
 
     vk_buffer dev_buffer = nullptr;
@@ -17182,12 +17009,10 @@ static const char * ggml_backend_vk_host_buffer_type_name(ggml_backend_buffer_ty
 }
 
 static void ggml_backend_vk_host_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    VK_LOG_MEMORY("ggml_backend_vk_host_buffer_free_buffer()");
     ggml_vk_host_free(vk_instance.devices[0], buffer->context);
 }
 
 static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
-    VK_LOG_MEMORY("ggml_backend_vk_host_buffer_type_alloc_buffer(" << size << ")");
 
     size += 32;  // Behave like the CPU buffer type
     void * ptr = nullptr;
@@ -17557,7 +17382,6 @@ void ggml_vk_hybrid_gpu_release_arena(void * backend_ctx) {
     if (arena.buffer) {
         ggml_vk_synchronize(ctx);
         if (arena.allocation_id) {
-            GGML_LOG_INFO("vulkan-hybrid-zc: workspace release allocation_id=%llu\n", (unsigned long long) arena.allocation_id);
             ggml_vk_hybrid_gpu_release_external_allocation(arena.allocation_id);
         }
         ggml_vk_destroy_buffer(arena.buffer);
@@ -17627,7 +17451,6 @@ bool ggml_vk_hybrid_gpu_pack(void * backend_ctx, const ggml_tensor * q, const gg
     auto & arena = ctx->hybrid_zc_workspace;
     if (arena.buffer && required <= arena.capacity) {
         arena.logical_size = required;
-        GGML_LOG_INFO("vulkan-hybrid-zc: workspace reuse required=%zu capacity=%zu\n", required, arena.capacity);
     } else {
         const size_t old_capacity = arena.capacity;
         if (arena.buffer) {
@@ -17651,9 +17474,6 @@ bool ggml_vk_hybrid_gpu_pack(void * backend_ctx, const ggml_tensor * q, const gg
         arena.exported_handle = arena.buffer->exported_handle;
         arena.level_zero_imported = false;
         if (old_capacity) {
-            GGML_LOG_INFO("vulkan-hybrid-zc: workspace grow old=%zu new=%zu\n", old_capacity, capacity);
-        } else {
-            GGML_LOG_INFO("vulkan-hybrid-zc: workspace allocate capacity=%zu\n", capacity);
         }
     }
     workspace->arena = &arena;

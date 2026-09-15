@@ -20,7 +20,6 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
-#include <chrono>
 #include <algorithm>
 
 using namespace dnnl;
@@ -182,11 +181,9 @@ extern "C" GGML_VULKAN_ONEDNN_API int ggml_vulkan_onednn_sdpa(int q, int kv, con
                 item->partition = std::make_shared<dnnl::graph::compiled_partition>(parts[0].compile(item->inputs, item->outputs, rt.engine_obj));
                 for (auto & x : item->outputs) x = item->partition->query_logical_tensor(x.get_id());
                 rt.graphs.emplace(key, item);
-                std::cerr << "ggml-vulkan-onednn: compiled shape q=" << q << " kv=" << kv << " h=16 hkv=4 d=256\n";
                 cached = std::move(item);
             } else {
                 cached = it->second;
-                std::cerr << "ggml-vulkan-onednn: reused shape q=" << q << " kv=" << kv << " h=16 hkv=4 d=256\n";
             }
         }
         auto & inputs = cached->inputs;
@@ -202,20 +199,13 @@ extern "C" GGML_VULKAN_ONEDNN_API int ggml_vulkan_onednn_sdpa(int q, int kv, con
         for (const auto & x : outputs) { mem.emplace_back(rt.queue, x.get_mem_size()); outptr.push_back(mem.back().p); outs.emplace_back(x, rt.engine_obj, mem.back().p); }
         // TODO: replace staging with Vulkan/L0 shared memory.
         auto copy = [&](size_t id, const void *src, size_t bytes) { for (size_t i = 0; i < inputs.size(); ++i) if (inputs[i].get_id() == id) { rt.queue.memcpy(inptr[i], src, bytes).wait_and_throw(); return; } throw std::runtime_error("graph input not found"); };
-        const auto t_h2d = std::chrono::steady_clock::now();
         copy(ids.q, query, size_t(16) * q * 256 * 2); copy(ids.k, key, size_t(4) * 256 * kv); copy(ids.ks, key_scale, size_t(4) * 8 * kv * 2); copy(ids.v, value, size_t(4) * kv * 256); copy(ids.vs, value_scale, size_t(4) * kv * 8 * 2); copy(ids.mask, mask, size_t(q) * kv * 2);
         const uint16_t divisor_bits = float_to_half(divisor); copy(ids.divisor, &divisor_bits, sizeof(divisor_bits));
-        const double h2d_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_h2d).count();
-        rt.queue.wait_and_throw(); std::cerr << "ggml-vulkan-onednn: dispatch A750 q=" << q << " kv=" << kv << "\n";
-        const auto t_exec = std::chrono::steady_clock::now();
+        rt.queue.wait_and_throw();
         dnnl::graph::sycl_interop::execute(*cached->partition, rt.stream_obj, ins, outs); rt.stream_obj.wait();
-        const double exec_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_exec).count();
-        const auto t_d2h = std::chrono::steady_clock::now();
         std::vector<uint16_t> host(size_t(16) * q * 256); bool found_output = false; for (size_t i = 0; i < outputs.size(); ++i) if (outputs[i].get_id() == ids.out) { rt.queue.memcpy(host.data(), outptr[i], host.size() * sizeof(uint16_t)); found_output = true; break; }
         if (!found_output) throw std::runtime_error("graph output not found");
         rt.queue.wait_and_throw();
-        const double d2h_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_d2h).count();
-        std::cerr << "ggml-vulkan-onednn: timing h2d_ms=" << h2d_ms << " onednn_exec_ms=" << exec_ms << " d2h_ms=" << d2h_ms << "\n";
         for (size_t i = 0; i < host.size(); ++i) { sycl::half h; std::memcpy(&h, &host[i], sizeof(h)); output[i] = static_cast<float>(h); if (!std::isfinite(output[i])) throw std::runtime_error("oneDNN output contains NaN/Inf"); }
         return 1;
     } catch (const std::exception &e) { std::cerr << "ggml-vulkan-onednn: failure: " << e.what() << "\n"; return 0; }
@@ -310,7 +300,6 @@ extern "C" GGML_VULKAN_ONEDNN_API int ggml_vulkan_onednn_release_win32(uint64_t 
             rt.imported_allocations.erase(it);
         }
         imported.reset();
-        std::cerr << "ggml-vulkan-onednn: released allocation_id=" << allocation_id << "\n";
         return 1;
     } catch (const std::exception & e) {
         std::cerr << "ggml-vulkan-onednn: Win32 release failure: " << e.what() << "\n";

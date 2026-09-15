@@ -12,7 +12,6 @@
 #include <cstring>
 #include <exception>
 #include <vector>
-#include <chrono>
 
 using sdpa_fn = int (*)(int, int, const uint16_t *, const int8_t *, const uint16_t *, const int8_t *, const uint16_t *, const uint16_t *, float, float *);
 using sdpa_win32_fn = int (*)(int, int, const ggml_vulkan_onednn_win32_allocation *, float);
@@ -117,7 +116,6 @@ bool ggml_vk_hybrid_try(void * backend_ctx, ggml_tensor * node) {
         const auto * mask = node->src[3];
         const int nq = (int) q->ne[1];
         const int nk = (int) k->ne[1];
-        const auto t_readback = std::chrono::steady_clock::now();
         std::vector<uint8_t> q_raw(ggml_nbytes(q)), k_raw(ggml_nbytes(k)), v_raw(ggml_nbytes(v)), m_raw(ggml_nbytes(mask));
         const ggml_tensor * tensors[] = { q, k, v, mask };
         void * data[] = { q_raw.data(), k_raw.data(), v_raw.data(), m_raw.data() };
@@ -126,8 +124,6 @@ bool ggml_vk_hybrid_try(void * backend_ctx, ggml_tensor * node) {
             GGML_LOG_WARN("vulkan-hybrid: batched readback failed -> Vulkan fallback\n");
             return false;
         }
-        const double readback_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_readback).count();
-        const auto t_split = std::chrono::steady_clock::now();
         std::vector<uint16_t> q_half(size_t(16)*nq*256);
         std::vector<int8_t> kp(size_t(4)*256*nk), vp(size_t(4)*nk*256);
         std::vector<uint16_t> ks(size_t(4)*8*nk), vs(size_t(4)*nk*8), mh(size_t(nq)*nk);
@@ -163,10 +159,8 @@ bool ggml_vk_hybrid_try(void * backend_ctx, ggml_tensor * node) {
         for (int t = 0; t < nq; ++t) {
             std::memcpy(mh.data() + size_t(t)*nk, m_raw.data() + t*mask->nb[1], size_t(nk)*2);
         }
-        const double host_split_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_split).count();
         std::vector<float> out(size_t(16)*nq*256), dst(out.size());
         const float scale = reinterpret_cast<const float *>(node->op_params)[0];
-        GGML_LOG_INFO("vulkan-hybrid: staging q=%d kv=%d batched_readback_ms=%.3f host_split_ms=%.3f\n", nq, nk, readback_ms, host_split_ms);
         if (!run(nq, nk, q_half.data(), kp.data(), ks.data(), vp.data(), vs.data(), mh.data(), 1.0f/scale, out.data())) {
             GGML_LOG_WARN("vulkan-hybrid: oneDNN failed -> Vulkan fallback\n");
             return false;
@@ -184,7 +178,6 @@ bool ggml_vk_hybrid_try(void * backend_ctx, ggml_tensor * node) {
             }
         }
         ggml_backend_tensor_set(node, dst.data(), 0, dst.size()*sizeof(float));
-        GGML_LOG_INFO("vulkan-hybrid: complete %s output_finite=yes\n", node->name);
         return true;
     } catch (const std::exception & e) {
         GGML_LOG_WARN("vulkan-hybrid: %s -> Vulkan fallback\n", e.what());
