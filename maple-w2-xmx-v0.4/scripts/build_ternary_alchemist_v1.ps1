@@ -13,13 +13,13 @@ $ErrorActionPreference = "Stop"
 $Repo = Resolve-Path (Join-Path $PSScriptRoot "../..")
 $BaseBuild = Join-Path $PSScriptRoot "build_ptq1_xmx_v5.ps1"
 
-$Args = @{
+$BuildArgs = @{
     BuildDir = $BuildDir
 }
-if ($Clean) { $Args.Clean = $true }
+if ($Clean) { $BuildArgs.Clean = $true }
 
 # Reuse the proven v5 configure/toolchain checks but keep a distinct build tree.
-& $BaseBuild @Args
+& $BaseBuild @BuildArgs
 if ($LASTEXITCODE -ne 0) { throw "Ternary optimized build failed." }
 
 if (-not $Model) {
