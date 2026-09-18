@@ -3780,6 +3780,8 @@ vk_device ggml_vk_get_device(size_t idx) {
         bool pipeline_robustness = false;
         bool coopmat2_support = false;
         bool coopmat2_decode_vector_support = false;
+        bool raw_khr_cooperative_matrix = false;
+        bool raw_khr_integer_dot = false;
         bool pipeline_executable_properties_support = false;
         bool internally_sync_support = false;
         device->coopmat_support = false;
@@ -3791,6 +3793,10 @@ vk_device ggml_vk_get_device(size_t idx) {
         bool shader_float8_extension = false;
 
         for (const auto& properties : ext_props) {
+            raw_khr_cooperative_matrix = raw_khr_cooperative_matrix ||
+                strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0;
+            raw_khr_integer_dot = raw_khr_integer_dot ||
+                strcmp("VK_KHR_shader_integer_dot_product", properties.extensionName) == 0;
             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
                 maintenance4_support = true;
             } else if (strcmp("VK_KHR_16bit_storage", properties.extensionName) == 0) {
@@ -4014,6 +4020,26 @@ vk_device ggml_vk_get_device(size_t idx) {
         if (GGML_VK_MAX_NODES_PER_SUBMIT != nullptr) {
             uint32_t max_nodes_per_submit = std::stoul(GGML_VK_MAX_NODES_PER_SUBMIT);
             device->max_nodes_per_submit = std::max(max_nodes_per_submit, 1u);
+        }
+
+        if (getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+            int build_coopmat = 0;
+            int build_intdot = 0;
+#if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+            build_coopmat = 1;
+#endif
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            build_intdot = 1;
+#endif
+            GGML_LOG_INFO(
+                "ggml_vulkan: PTQ1 raw probe | vendor=0x%04x device=0x%04x driver_id=%d raw_coopmat=%d build_coopmat=%d gated_coopmat=%d raw_intdot=%d build_intdot=%d gated_intdot=%d\n",
+                device->properties.vendorID, device->properties.deviceID, (int) device->driver_id,
+                raw_khr_cooperative_matrix ? 1 : 0,
+                build_coopmat,
+                device->coopmat_support ? 1 : 0,
+                raw_khr_integer_dot ? 1 : 0,
+                build_intdot,
+                device->integer_dot_product ? 1 : 0);
         }
 
         const bool force_disable_f16 = getenv("GGML_VK_DISABLE_F16") != nullptr;
@@ -4501,16 +4527,6 @@ vk_device ggml_vk_get_device(size_t idx) {
                 device->coopmat_support = false;
             }
 
-            if (getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
-                GGML_LOG_INFO(
-                    "ggml_vulkan: PTQ1 probe | coopmat=%d fp_shape=%ux%ux%u int8_coopmat=%d int8_shape=%ux%ux%u int_dot=%d subgroup_min=%u subgroup_max=%u\n",
-                    device->coopmat_support ? 1 : 0,
-                    device->coopmat_m, device->coopmat_n, device->coopmat_k,
-                    device->coopmat_int_support ? 1 : 0,
-                    device->coopmat_int_m, device->coopmat_int_n, device->coopmat_int_k,
-                    device->integer_dot_product ? 1 : 0,
-                    device->subgroup_min_size, device->subgroup_max_size);
-            }
         }
 
         if (device->coopmat_support) {
