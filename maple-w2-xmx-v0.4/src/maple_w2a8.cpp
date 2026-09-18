@@ -336,7 +336,8 @@ static sycl::event launch_ptq1_dense_tiles(sycl::queue& q,DeviceProblem p,A8Opti
 
             const uint32_t nk=p.shape.k/256;
             const size_t row_stride=size_t(nk)*2*ptq1_block_bytes;
-            es::simd<uint32_t,32> ao(0,1),oo(0,4);
+            es::simd<uint32_t,32> ao(0,1);
+            es::simd<uint32_t,8> oo(0,4);
             for(uint32_t kb=0;kb<nk;++kb) {
                 es::simd<uint16_t,8> ds_lo,ds_hi;
                 #pragma unroll
