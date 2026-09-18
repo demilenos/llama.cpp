@@ -5310,7 +5310,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             throw std::runtime_error(std::string(name) + ": unsupported value");
         };
         ptq1_mmv_rows = parse_mmv("GGML_VK_PTQ1_MMV_ROWS", ptq1_mmv_rows, 1, 16);
-        ptq1_mmv_wg_override = parse_mmv("GGML_VK_PTQ1_MMV_WG", 0, 16, 128);
+        ptq1_mmv_wg_override = parse_mmv("GGML_VK_PTQ1_MMV_WG", 0, 16, 512);
         if ((getenv("GGML_VK_PTQ1_MMV_ROWS") || ptq1_mmv_wg_override) &&
             (!use_subgroups || !device->subgroup_size_control || subgroup_size != 16 ||
              ptq1_mmv_wg_override > device->properties.limits.maxComputeWorkGroupInvocations ||
