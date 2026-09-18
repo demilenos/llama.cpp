@@ -36,10 +36,16 @@ struct ggml_vk_external_descriptor {
     uint32_t magic = 0x4d4c345a;
     uint32_t abi_version = 1;
 };
+struct ggml_vk_external_timeline {
+    void * semaphore_handle = nullptr; // borrowed OPAQUE_WIN32 timeline semaphore handle
+    uint64_t wait_value = 0;           // Level Zero waits for Vulkan release
+    uint64_t signal_value = 0;         // Level Zero signals completion to Vulkan
+};
 struct ggml_vk_external_api {
     uint32_t abi_version;
     bool (*get_span)(ggml_vk_external_lease *, const ggml_tensor *, ggml_vk_external_span *);
-    bool (*release_to_external)(ggml_vk_external_lease *);
+    bool (*release_to_external)(ggml_vk_external_lease *); // ABI v1 host-fenced fallback
+    bool (*release_to_external_async)(ggml_vk_external_lease *, ggml_vk_external_timeline *); // ABI v2
 };
 using ggml_vk_external_executor = bool (*)(ggml_tensor *, void *, ggml_vk_external_lease *, const ggml_vk_external_api *);
 using ggml_vk_external_register = bool (*)(ggml_custom_op_t, ggml_vk_external_executor, uint32_t);
