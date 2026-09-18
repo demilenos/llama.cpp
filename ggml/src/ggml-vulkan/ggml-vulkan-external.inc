@@ -196,8 +196,35 @@ static bool ggml_vk_external_submit_async(
         auto & timeline = l->ctx->ptq1_external_timeline;
         if (!timeline.semaphore) return false;
 
+        // Flush producer work into GPU queues without waiting on the host.
+        // The release submission below inherits the transfer timeline dependency.
+        if (release) {
+            if (ggml_vk_submit_transfer_ctx(l->ctx)) {
+                l->ctx->submit_pending = true;
+            }
+            if (!l->ctx->compute_ctx.expired()) {
+                vk_context pending = l->ctx->compute_ctx.lock();
+                if (!pending->out_memcpys.empty()) {
+                    GGML_LOG_ERROR("ggml_vulkan: PTQ1 async handoff refuses pending host readback\n");
+                    return false;
+                }
+                ggml_vk_ctx_end(pending);
+                for (auto & cpy : pending->in_memcpys) {
+                    memcpy(cpy.dst, cpy.src, cpy.n);
+                }
+                ggml_vk_submit(pending, {});
+                l->ctx->compute_ctx.reset();
+                l->ctx->submit_pending = true;
+            }
+        }
+
         vk_context sync_ctx = ggml_vk_create_context(l->ctx, l->ctx->compute_cmd_pool);
         ggml_vk_ctx_begin(device, sync_ctx);
+        if (release && device->async_use_transfer_queue &&
+            l->ctx->transfer_semaphore_last_submitted < l->ctx->transfer_semaphore.value) {
+            sync_ctx->s->wait_semaphores.push_back(l->ctx->transfer_semaphore);
+            l->ctx->transfer_semaphore_last_submitted = l->ctx->transfer_semaphore.value;
+        }
 
         std::vector<vk::BufferMemoryBarrier> barriers;
         barriers.reserve(l->buffers.size());
