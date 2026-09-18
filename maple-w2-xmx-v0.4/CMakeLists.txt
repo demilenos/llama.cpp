@@ -78,3 +78,23 @@ endif()
 
 # Level4 attention-to-attention island (additive)
 include(cmake/level4.cmake)
+
+option(MAPLE_BUILD_GGML_PTQ1_BRIDGE "Build Prism GGML PTQ1 Vulkan/Level Zero bridge" OFF)
+if(MAPLE_BUILD_GGML_PTQ1_BRIDGE)
+  if(NOT WIN32 OR NOT TARGET maple-w2-xmx OR NOT MAPLE_LEVEL4_ZERO_COPY)
+    message(FATAL_ERROR "PTQ1 GGML bridge requires Windows, MAPLE_BUILD_SYCL and MAPLE_LEVEL4_ZERO_COPY")
+  endif()
+  add_library(maple-ptq1-ggml-bridge STATIC integration/ggml_ptq1_bridge.cpp)
+  target_include_directories(maple-ptq1-ggml-bridge
+    PUBLIC include
+    PRIVATE
+      "${CMAKE_SOURCE_DIR}/ggml/include"
+      "${CMAKE_SOURCE_DIR}/ggml/src"
+      "${CMAKE_SOURCE_DIR}/ggml/src/ggml-vulkan"
+      "${MAPLE_LEVEL_ZERO_INCLUDE_DIR}")
+  target_link_libraries(maple-ptq1-ggml-bridge
+    PUBLIC maple-w2-xmx
+    PRIVATE "${MAPLE_LEVEL_ZERO_LIBRARY}" dxgi d3d12)
+  target_compile_definitions(maple-ptq1-ggml-bridge PUBLIC NOMINMAX)
+  target_compile_options(maple-ptq1-ggml-bridge PRIVATE ${MAPLE_PRECISE_FLAGS})
+endif()
