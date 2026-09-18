@@ -488,7 +488,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
-        GGML_FTYPE_MOSTLY_PTQ1_0  = 129, // Prism group-128 ternary
+        GGML_FTYPE_MOSTLY_PTQ1_0  = 143, // Prism group-128 ternary
     };
 
     // available tensor operations:
