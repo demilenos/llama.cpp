@@ -212,6 +212,9 @@ static bool ggml_vk_external_submit_async(
                 for (auto & cpy : pending->in_memcpys) {
                     memcpy(cpy.dst, cpy.src, cpy.n);
                 }
+                for (auto & mset : pending->memsets) {
+                    memset(mset.dst, mset.val, mset.n);
+                }
                 ggml_vk_submit(pending, {});
                 l->ctx->compute_ctx.reset();
                 l->ctx->submit_pending = true;
