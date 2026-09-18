@@ -882,6 +882,7 @@ struct vk_device_struct {
     uint64_t min_imported_host_pointer_alignment;
     bool external_memory_host {};
     bool external_memory_win32 {};
+    bool external_semaphore_win32 {};
     bool fp16;
     bool bf16;
     bool pipeline_robustness;
@@ -1376,6 +1377,14 @@ struct ggml_vk_hybrid_gpu_arena {
 struct vk_semaphore {
     vk::Semaphore s;
     uint64_t value;
+};
+
+struct vk_external_timeline_state {
+    vk::Semaphore semaphore {};
+    uint64_t value = 0;
+#if defined(_WIN32)
+    HANDLE exported_handle = nullptr;
+#endif
 };
 
 // vk_event is used for the event-related backend interfaces. It uses vk::Events for
@@ -2606,6 +2615,7 @@ struct ggml_backend_vk_context {
 #ifdef GGML_VULKAN_HYBRID
     ggml_vk_hybrid_gpu_arena hybrid_zc_workspace;
 #endif
+    vk_external_timeline_state ptq1_external_timeline;
 
     size_t semaphore_idx, event_idx;
     ggml_vk_garbage_collector gc;
@@ -2909,6 +2919,7 @@ static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph *
 typedef void (*ggml_vk_func_t)(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
 
 static void ggml_backend_vk_free(ggml_backend_t backend);
+static void ggml_vk_external_timeline_cleanup(ggml_backend_vk_context * ctx);
 
 static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context * ctx, const vk_buffer &buf, const VkDeviceSize offset) {
     const VkDeviceSize range = std::min(VkDeviceSize{buf->size - offset},
@@ -6911,6 +6922,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         bool ocp_microscaling_extension = false;
         bool shader_float8_extension = false;
         bool external_memory_win32_support = false;
+        bool external_semaphore_win32_support = false;
 
         for (const auto& properties : ext_props) {
             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
@@ -6974,6 +6986,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
 #if defined(_WIN32)
             } else if (strcmp("VK_KHR_external_memory_win32", properties.extensionName) == 0) {
                 external_memory_win32_support = true;
+            } else if (strcmp("VK_KHR_external_semaphore_win32", properties.extensionName) == 0) {
+                external_semaphore_win32_support = true;
 #endif
 #if defined(VK_EXT_shader_64bit_indexing)
             } else if (strcmp("VK_EXT_shader_64bit_indexing", properties.extensionName) == 0) {
@@ -7330,6 +7344,10 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->external_memory_win32 = external_memory_win32_support;
         if (device->external_memory_win32) {
             device_extensions.push_back("VK_KHR_external_memory_win32");
+        }
+        device->external_semaphore_win32 = external_semaphore_win32_support;
+        if (device->external_semaphore_win32) {
+            device_extensions.push_back("VK_KHR_external_semaphore_win32");
         }
 #endif
 
@@ -17477,6 +17495,7 @@ static void ggml_backend_vk_free(ggml_backend_t backend) {
     ggml_vk_hybrid_gpu_release_arena(ctx);
 #endif
     ggml_vk_cleanup(ctx);
+    ggml_vk_external_timeline_cleanup(ctx);
 
     delete ctx;
     delete backend;
@@ -18919,7 +18938,11 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ggml_vk_compute_forward(ctx, cgraph, cgraph->nodes[submit_node_idx], submit_node_idx, false);
                 submit_after(submit_node_idx, i - 1);
             }
-            ggml_vk_synchronize(ctx);
+            if (!ctx->device->support_async || ctx->device->serialize_submissions ||
+                !ctx->device->external_semaphore_win32) {
+                GGML_LOG_ERROR("ggml_vulkan: PTQ1 XMX requires async submissions and Win32 external timeline semaphores\n");
+                return GGML_STATUS_FAILED;
+            }
             if (!ggml_vk_ptq1_external_compute(ctx, cgraph->nodes[i])) return GGML_STATUS_FAILED;
             first_node_in_batch = true;
             continue;
