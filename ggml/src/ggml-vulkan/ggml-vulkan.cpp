@@ -4070,6 +4070,8 @@ static vk_buffer ggml_vk_create_buffer_check(vk_device& device, size_t size, vk:
 
 static std::atomic<ggml_custom_op_t> vk_external_callback{nullptr};
 static std::atomic<ggml_vk_external_executor> vk_external_executor{nullptr};
+static std::atomic<ggml_vk_ptq1_supported> vk_ptq1_supported{nullptr};
+static std::atomic<ggml_vk_ptq1_executor> vk_ptq1_executor{nullptr};
 static bool ggml_vk_external_register_executor(ggml_custom_op_t callback, ggml_vk_external_executor executor, uint32_t version) {
     if (!callback || !executor || version != 1) return false;
     auto old = vk_external_callback.load();
@@ -4084,6 +4086,19 @@ static bool ggml_vk_external_node(const ggml_tensor * node) {
     if (p.fun != vk_external_callback.load() || !p.userdata) return false;
     ggml_vk_external_descriptor d; memcpy(&d, p.userdata, sizeof(d));
     return d.magic == 0x4d4c345a && d.abi_version == 1;
+}
+static bool ggml_vk_ptq1_register_executor(
+        ggml_vk_ptq1_supported supported,
+        ggml_vk_ptq1_executor executor,
+        uint32_t version) {
+    if (!supported || !executor || version != 1) return false;
+    vk_ptq1_supported.store(supported);
+    vk_ptq1_executor.store(executor);
+    return true;
+}
+static bool ggml_vk_ptq1_node(const ggml_tensor * node) {
+    const auto supported = vk_ptq1_supported.load();
+    return supported && vk_ptq1_executor.load() && supported(node);
 }
 
 static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size, bool export_win32 = false) {
@@ -17338,7 +17353,8 @@ static ggml_backend_buffer_t ggml_backend_vk_buffer_type_alloc_buffer(ggml_backe
 
     vk_buffer dev_buffer = nullptr;
     try {
-        dev_buffer = ggml_vk_create_buffer_device(ctx->device, size, vk_external_executor.load() && ctx->device->external_memory_win32);
+        const bool external_executor = vk_external_executor.load() || vk_ptq1_executor.load();
+        dev_buffer = ggml_vk_create_buffer_device(ctx->device, size, external_executor && ctx->device->external_memory_win32);
     } catch (const vk::SystemError& e) {
         return nullptr;
     }
@@ -18892,6 +18908,23 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             submit_node_idx = i;
         }
 
+        if (ggml_vk_ptq1_node(cgraph->nodes[i])) {
+            if (ggml_is_empty(cgraph->nodes[i])) continue;
+            if (vk_perf_logger_enabled) return GGML_STATUS_FAILED;
+            if (!first_node_in_batch) {
+                vk_context flush_ctx = ggml_vk_get_compute_ctx(ctx);
+                ggml_vk_ctx_end(flush_ctx);
+                flush_ctx->exit_tensor_idx = -1;
+                ctx->compute_ctx.reset();
+                ggml_vk_compute_forward(ctx, cgraph, cgraph->nodes[submit_node_idx], submit_node_idx, false);
+                submit_after(submit_node_idx, i - 1);
+            }
+            ggml_vk_synchronize(ctx);
+            if (!ggml_vk_ptq1_external_compute(ctx, cgraph->nodes[i])) return GGML_STATUS_FAILED;
+            first_node_in_batch = true;
+            continue;
+        }
+
         if (ggml_vk_external_node(cgraph->nodes[i])) {
             if (ggml_is_empty(cgraph->nodes[i])) continue;
             if (vk_perf_logger_enabled) return GGML_STATUS_FAILED;
@@ -19946,6 +19979,9 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
     ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
     const vk_device& device = ggml_vk_get_device(ctx->device);
 
+    if (ggml_vk_ptq1_node(op)) {
+        return device->external_memory_win32 && !device->external_poisoned && !vk_perf_logger_enabled;
+    }
     if (ggml_vk_external_node(op)) {
         return device->external_memory_win32 && !device->external_poisoned && !vk_perf_logger_enabled;
     }
@@ -20817,6 +20853,7 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
 
 static void * ggml_backend_vk_reg_get_proc_address(ggml_backend_reg_t, const char * name) {
     if (!strcmp(name, "ggml_vk_external_register_v1")) return reinterpret_cast<void *>(ggml_vk_external_register_executor);
+    if (!strcmp(name, "ggml_vk_ptq1_register_v1")) return reinterpret_cast<void *>(ggml_vk_ptq1_register_executor);
     return nullptr;
 }
 

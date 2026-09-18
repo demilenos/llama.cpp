@@ -43,3 +43,7 @@ struct ggml_vk_external_api {
 };
 using ggml_vk_external_executor = bool (*)(ggml_tensor *, void *, ggml_vk_external_lease *, const ggml_vk_external_api *);
 using ggml_vk_external_register = bool (*)(ggml_custom_op_t, ggml_vk_external_executor, uint32_t);
+
+using ggml_vk_ptq1_supported = bool (*)(const ggml_tensor *);
+using ggml_vk_ptq1_executor = bool (*)(ggml_tensor *, ggml_vk_external_lease *, const ggml_vk_external_api *);
+using ggml_vk_ptq1_register = bool (*)(ggml_vk_ptq1_supported, ggml_vk_ptq1_executor, uint32_t);

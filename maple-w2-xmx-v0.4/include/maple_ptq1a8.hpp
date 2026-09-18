@@ -17,6 +17,22 @@ constexpr uint32_t ptq1_block_bytes = 28;
 //    32 B scales: [row0 lo128, row0 hi128, ... row7 lo128, row7 hi128]
 constexpr uint32_t ptq1_tile_bytes = 544;
 
+struct Ptq1TritCoord {
+    uint32_t byte = 0;
+    uint32_t trit = 0;
+};
+
+// Element-order coordinate used by both the host oracle and the native XMX
+// feeder. PTQ1 qs[0..23] are laid out as 16-wide then 8-wide base-3 stages;
+// qh[0..1] carry the final 8 values.
+constexpr Ptq1TritCoord ptq1_trit_coord(uint32_t i) {
+    return i < 80
+        ? Ptq1TritCoord{i % 16, i / 16}
+        : i < 120
+            ? Ptq1TritCoord{16 + (i - 80) % 8, (i - 80) / 8}
+            : Ptq1TritCoord{24 + (i - 120) % 2, (i - 120) / 2};
+}
+
 inline size_t ptq1_nbytes(Shape s) {
     if (!s.k || s.k % 256 || !s.m || s.m % 8 || !s.experts) {
         throw std::invalid_argument("PTQ1 XMX requires K % 256 == 0, M % 8 == 0 and positive dimensions");

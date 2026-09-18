@@ -4,12 +4,13 @@
 #include <sycl/sycl.hpp>
 
 namespace maple_w2 {
-enum class Layout { native_tq2, tile8, s2tile8, ptq1_s2tile8 };
+enum class Layout { native_tq2, tile8, s2tile8, ptq1_s2tile8, native_ptq1 };
 enum class ActivationType { f32, f16 };
 // All pointers must be device/shared USM or compatible external-memory imports
 // in q.get_context(). DO NOT pass raw Vulkan addresses or CPU allocations.
 // Native TQ2 weights must first pass validate_tq2(); ptq1_s2tile8 weights are
-// produced by repack_ptq1_s2tile8(). Views are contiguous in this pilot.
+// produced by repack_ptq1_s2tile8(); native_ptq1 points at raw Prism PTQ1_0 bytes.
+// Views are contiguous in this pilot.
 struct DeviceProblem {
     Shape shape;
     uint32_t tokens=1, topk=8;
