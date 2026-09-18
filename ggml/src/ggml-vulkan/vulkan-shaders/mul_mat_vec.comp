@@ -159,12 +159,9 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
 
 #if defined(DATA_A_PTQ1_0)
     const uint blocks_per_row = p.ncols / 128u;
-    for (uint lane = tid; lane < blocks_per_row * 32u; lane += BLOCK_SIZE) {
-        const uint block = lane >> 5u;
-        const uint slot = lane & 31u;
-        if (slot >= 26u) {
-            continue;
-        }
+    for (uint lane = tid; lane < blocks_per_row * 26u; lane += BLOCK_SIZE) {
+        const uint block = lane / 26u;
+        const uint slot = lane % 26u;
         const uint step = slot < 16u ? 16u : (slot < 24u ? 8u : 2u);
         const uint first = slot < 16u ? slot : (slot < 24u ? 80u + slot - 16u : 120u + slot - 24u);
         [[unroll]] for (uint j = 0u; j < NUM_COLS; ++j) {
