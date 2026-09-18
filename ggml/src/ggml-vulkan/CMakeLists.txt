@@ -228,6 +228,10 @@ if (Vulkan_FOUND)
     foreach (file_full ${_ggml_vk_shader_files})
         get_filename_component(file ${file_full} NAME)
         set (_ggml_vk_target_cpp "${CMAKE_CURRENT_BINARY_DIR}/${file}.cpp")
+        set (_ggml_vk_ptq1_deps)
+        if (file MATCHES "^(mul_mm|mul_mat_vec|get_rows_quant|copy_from_quant)\\.comp$")
+            list(APPEND _ggml_vk_ptq1_deps "${_ggml_vk_input_dir}/ptq1_0.glsl")
+        endif()
 
         add_custom_command(
             OUTPUT  ${_ggml_vk_target_cpp}
@@ -238,7 +242,7 @@ if (Vulkan_FOUND)
                 --output-dir ${_ggml_vk_output_dir}
                 --target-hpp ${_ggml_vk_header}
                 --target-cpp ${_ggml_vk_target_cpp}
-            DEPENDS ${file_full}
+            DEPENDS ${file_full} ${_ggml_vk_ptq1_deps}
                     ${_ggml_vk_shaders_gen_sources}
                     vulkan-shaders-gen
             COMMENT "Generate vulkan shaders for ${file}"

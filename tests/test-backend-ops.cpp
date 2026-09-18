@@ -7793,6 +7793,14 @@ struct test_generic_op : public test_case {
                     std::vector<input_tensor> sources, std::string name = "")
         : op(op), type(type), ne(ne), op_params(op_params), sources(sources), name(std::move(name)) {}
 
+    uint64_t op_flops(ggml_tensor * t) override {
+        if (op != GGML_OP_MUL_MAT || sources.empty()) {
+            return 0;
+        }
+
+        return 2 * sources[0].ne[0] * ggml_nelements(t);
+    }
+
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const size_t source_count = std::min(sources.size(), (size_t)GGML_MAX_SRC);
 

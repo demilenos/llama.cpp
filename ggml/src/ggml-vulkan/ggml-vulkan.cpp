@@ -50,6 +50,7 @@ typedef struct VkPhysicalDeviceCooperativeMatrixDecodeVectorFeaturesNV {
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <tuple>
@@ -4727,20 +4728,63 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 #endif  // defined(VK_NV_cooperative_matrix2) && defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
 #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
     if (device->coopmat_support) {
+        const bool pin_a750_cm1 = device->vendor_id == VK_VENDOR_ID_INTEL && device->properties.deviceID == 0x56a1;
+        if (pin_a750_cm1 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+            GGML_LOG_INFO("ggml_vulkan: A750 CM1 subgroup | mm(s,m,l)=%u,%u,%u quant(s,m,l)=%u,%u,%u\n",
+                s_warptile[10], m_warptile[10], l_warptile[10],
+                s_warptile_mmq[10], m_warptile_mmq[10], l_warptile_mmq[10]);
+        }
+        uint32_t bm = 256, bn = 128, bk = 32, wm = 32, wn = 32, sg = 16;
+        const char * tile_env = pin_a750_cm1 ? getenv("GGML_VK_PTQ1_TILE") : nullptr;
+        if (tile_env) {
+            int v[6];
+            char tail;
+            if (std::sscanf(tile_env, "%d,%d,%d,%d,%d,%d %c", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &tail) != 6 ||
+                std::any_of(std::begin(v), std::end(v), [](int x) { return x <= 0 || x > 65536; })) {
+                throw std::runtime_error("GGML_VK_PTQ1_TILE: expected six positive integers BM,BN,BK,WM,WN,SG (<=65536)");
+            }
+            bm = v[0]; bn = v[1]; bk = v[2]; wm = v[3]; wn = v[4]; sg = v[5];
+        }
+        const uint64_t warps = uint64_t(bm / wm) * (bn / wn);
+        const uint64_t wg = warps * sg;
+        const bool tile_geometry = bm >= 32 && bn >= 32 && bk >= 32 && (bn & (bn - 1)) == 0 && (bk & (bk - 1)) == 0 &&
+            bm % wm == 0 && bn % wn == 0 && wm % device->coopmat_m == 0 && wn % device->coopmat_n == 0 &&
+            bk % device->coopmat_k == 0 && (sg & (sg - 1)) == 0 && sg % device->coopmat_m == 0 &&
+            wg > 0 && wg * 8 >= bk && wg * 2 >= bk && (wg * 8) % bk == 0 && (wg * 2) % bk == 0 &&
+            wg * 8 / bk <= bm && wg * 8 / bk <= bn &&
+            bm % (wg * 8 / bk) == 0 && bn % (wg * 8 / bk) == 0;
+        const uint64_t ptq1_cm1_shmem = uint64_t(bm + bn) * bk * sizeof(ggml_fp16_t) +
+            uint64_t(device->coopmat_m) * device->coopmat_n * warps * sizeof(float);
+        const bool use_ptq1_cm1_l = pin_a750_cm1 && tile_geometry && device->fp16 && device->subgroup_size_control &&
+            device->subgroup_min_size <= sg && device->subgroup_max_size >= sg &&
+            wg <= device->properties.limits.maxComputeWorkGroupInvocations &&
+            wg <= device->properties.limits.maxComputeWorkGroupSize[0] &&
+            ptq1_cm1_shmem <= device->properties.limits.maxComputeSharedMemorySize;
+        if (tile_env && !use_ptq1_cm1_l) {
+            throw std::runtime_error("GGML_VK_PTQ1_TILE: unsupported shape, load partition, subgroup, workgroup, or shared-memory requirement");
+        }
+        const std::vector<uint32_t> ptq1_cm1_l = { uint32_t(wg), bm, bn, bk, wm, wn, 2,
+            device->coopmat_m, device->coopmat_n, device->coopmat_k, sg };
+        const std::array<uint32_t, 3> ptq1_cm1_denoms = { bm, bn, 1 };
+        if (pin_a750_cm1 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 CM1 large tile | enabled=%d tile=%ux%ux%u warp=%ux%u workgroup=%llu subgroup=%u shmem=%llu\n",
+                use_ptq1_cm1_l ? 1 : 0, bm, bn, bk, wm, wn, (unsigned long long) wg, sg, (unsigned long long) ptq1_cm1_shmem);
+        }
+#define PTQ1_CM1_L(TYPE, ID) (use_ptq1_cm1_l && (TYPE) == GGML_TYPE_PTQ1_0 && sizeof(#ID) == 1)
         // Create 6 variants, {s,m,l}x{unaligned,aligned}
 #define CREATE_MM(TYPE, PIPELINE_NAME, NAMELC, F16ACC, WG_DENOMS, WARPTILE, PUSHCONST, PARAMCOUNT, ID) \
         if (device->mul_mat ## ID ## _l[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->l, #NAMELC #F16ACC "_l", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), l_ ## WG_DENOMS, ggml_vk_mul_mm_spec(l_ ## WARPTILE, false), 1, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->l, #NAMELC #F16ACC "_l", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), PTQ1_CM1_L(TYPE, ID) ? ptq1_cm1_denoms : l_ ## WG_DENOMS, ggml_vk_mul_mm_spec(PTQ1_CM1_L(TYPE, ID) ? ptq1_cm1_l : l_ ## WARPTILE, false), 1, false, true, PTQ1_CM1_L(TYPE, ID) ? sg : (pin_a750_cm1 ? l_ ## WARPTILE[10] : 0));   \
         if (device->mul_mat ## ID ## _m[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->m, #NAMELC #F16ACC "_m", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), m_ ## WG_DENOMS, ggml_vk_mul_mm_spec(m_ ## WARPTILE, false), 1, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->m, #NAMELC #F16ACC "_m", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), m_ ## WG_DENOMS, ggml_vk_mul_mm_spec(m_ ## WARPTILE, false), 1, false, true, pin_a750_cm1 ? m_ ## WARPTILE[10] : 0);   \
         if (device->mul_mat ## ID ## _s[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->s, #NAMELC #F16ACC "_s", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), s_ ## WG_DENOMS, ggml_vk_mul_mm_spec(s_ ## WARPTILE, false), 1, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->s, #NAMELC #F16ACC "_s", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), s_ ## WG_DENOMS, ggml_vk_mul_mm_spec(s_ ## WARPTILE, false), 1, false, true, pin_a750_cm1 ? s_ ## WARPTILE[10] : 0);   \
         if (device->mul_mat ## ID ## _l[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_l, #NAMELC #F16ACC "_aligned_l", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), l_ ## WG_DENOMS, ggml_vk_mul_mm_spec(l_ ## WARPTILE, true), l_align, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_l, #NAMELC #F16ACC "_aligned_l", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), PTQ1_CM1_L(TYPE, ID) ? ptq1_cm1_denoms : l_ ## WG_DENOMS, ggml_vk_mul_mm_spec(PTQ1_CM1_L(TYPE, ID) ? ptq1_cm1_l : l_ ## WARPTILE, true), PTQ1_CM1_L(TYPE, ID) ? bk : l_align, false, true, PTQ1_CM1_L(TYPE, ID) ? sg : (pin_a750_cm1 ? l_ ## WARPTILE[10] : 0));   \
         if (device->mul_mat ## ID ## _m[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_m, #NAMELC #F16ACC "_aligned_m", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), m_ ## WG_DENOMS, ggml_vk_mul_mm_spec(m_ ## WARPTILE, true), m_align, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_m, #NAMELC #F16ACC "_aligned_m", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), m_ ## WG_DENOMS, ggml_vk_mul_mm_spec(m_ ## WARPTILE, true), m_align, false, true, pin_a750_cm1 ? m_ ## WARPTILE[10] : 0);   \
         if (device->mul_mat ## ID ## _s[TYPE]) \
-            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_s, #NAMELC #F16ACC "_aligned_s", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), s_ ## WG_DENOMS, ggml_vk_mul_mm_spec(s_ ## WARPTILE, true), s_align, false, true);   \
+            ggml_vk_create_pipeline(device, device-> PIPELINE_NAME ->a_s, #NAMELC #F16ACC "_aligned_s", NAMELC ## F16ACC ## _cm1_len, NAMELC ## F16ACC ## _cm1_data, "main", PARAMCOUNT, sizeof(PUSHCONST), s_ ## WG_DENOMS, ggml_vk_mul_mm_spec(s_ ## WARPTILE, true), s_align, false, true, pin_a750_cm1 ? s_ ## WARPTILE[10] : 0);   \
 
         // Create 2 variants, {f16,f32} accumulator
 #define CREATE_MM2(TYPE, PIPELINE_NAME, NAMELC, WG_DENOMS, WARPTILE, PUSHCONST, PARAMCOUNT, ID) \
@@ -4841,6 +4885,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             CREATE_MM2(GGML_TYPE_MXFP4,   pipeline_dequant_mul_mat_mat_id[GGML_TYPE_MXFP4],   matmul_id_subgroup_mxfp4_f32,   mmq_wg_denoms, warptile_mmq, vk_mat_mat_id_push_constants, mul_mat_id_param_count, _id);
             CREATE_MM2(GGML_TYPE_NVFP4,   pipeline_dequant_mul_mat_mat_id[GGML_TYPE_NVFP4],   matmul_id_subgroup_nvfp4_f32,   mmq_wg_denoms, warptile_mmq, vk_mat_mat_id_push_constants, mul_mat_id_param_count, _id);
         }
+#undef PTQ1_CM1_L
 #undef CREATE_MM2
 #undef CREATE_MM
     } else
@@ -6981,6 +7026,13 @@ static vk_device ggml_vk_get_device(size_t idx) {
         }
 #endif
 #endif
+        if (getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 capability | device=%s coopmat=%d shape=%ux%ux%u int_dot=%d force_xmx=%d shape16_f32=%d shape16_f16=%d\n",
+                device->properties.deviceName.data(), device->coopmat_support ? 1 : 0,
+                device->coopmat_m, device->coopmat_n, device->coopmat_k,
+                device->integer_dot_product ? 1 : 0, getenv("GGML_VK_PTQ1_FORCE_XMX") != nullptr ? 1 : 0,
+                device->coopmat_support_16x16x16_f32acc ? 1 : 0, device->coopmat_support_16x16x16_f16acc ? 1 : 0);
+        }
         device->name = GGML_VK_NAME + std::to_string(idx);
 
         device_create_info
@@ -9318,6 +9370,16 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
 
     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
         pipeline = ggml_vk_get_64b_indexing_pipeline(ctx, pipeline);
+    }
+
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+        static std::atomic<uint32_t> probe_count { 0 };
+        if (probe_count.fetch_add(1) < 16) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 PP route | coopmat=%d quantize_y=%d dequant_x=%d m=%llu n=%llu k=%llu pipeline=%s\n",
+                ctx->device->coopmat_support ? 1 : 0, quantize_y ? 1 : 0, qx_needs_dequant ? 1 : 0,
+                (unsigned long long) ne01, (unsigned long long) ne11, (unsigned long long) ne10,
+                pipeline ? pipeline->name.c_str() : "(null)");
+        }
     }
 
     // Reserve extra storage in the N dimension for the Y matrix, so we can avoid bounds-checking
@@ -15915,7 +15977,14 @@ static void ggml_vk_compute_forward(ggml_backend_vk_context * ctx, ggml_cgraph *
 
     vk_context subctx = ctx->tensor_ctxs[tensor_idx].lock();
 
+    if (getenv("GGML_VK_SUBMIT_TRACE") != nullptr) {
+        GGML_LOG_INFO("ggml_vulkan: compute forward idx=%d tensor=%s(%s) context=%p seqs=%zu submit_pending=%d\n",
+            tensor_idx, tensor->name, ggml_op_name(tensor->op), (void *) subctx.get(),
+            subctx ? subctx->seqs.size() : size_t{0}, ctx->submit_pending ? 1 : 0);
+    }
+
     // Only run if ctx hasn't been submitted yet
+
     if (!subctx->seqs.empty()) {
 #ifdef GGML_VULKAN_CHECK_RESULTS
         ggml_vk_check_results_0(ctx, cgraph, tensor_idx);
@@ -17243,9 +17312,18 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     uint64_t flops_per_submit = std::min(flops_cap, ctx->last_total_flops / 40u);
 
     auto const submit_after = [&](int start, int end) {
+        const bool trace_submit = getenv("GGML_VK_SUBMIT_TRACE") != nullptr;
         if (ctx->device->serialize_submissions) {
+            if (trace_submit) {
+                GGML_LOG_INFO("ggml_vulkan: submit wait begin nodes=%d..%d first=%s(%s) last=%s(%s)\n",
+                    start, end, cgraph->nodes[start]->name, ggml_op_name(cgraph->nodes[start]->op),
+                    cgraph->nodes[end]->name, ggml_op_name(cgraph->nodes[end]->op));
+            }
             try {
                 auto res = ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX);
+                if (trace_submit) {
+                    GGML_LOG_INFO("ggml_vulkan: submit wait end nodes=%d..%d result=%d\n", start, end, (int) res);
+                }
                 if (res != vk::Result::eSuccess) {
                     GGML_LOG_ERROR("ggml_vulkan: waitForFences error during serialized submission\n");
                     throw vk::SystemError(vk::make_error_code(res), "ggml_vulkan: waitForFences during serialized submission");
@@ -17513,7 +17591,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
         // Signal the almost_ready fence when the graph is mostly complete (< 20% remaining)
         bool almost_ready = (cgraph->n_nodes - i) < cgraph->n_nodes / 5;
-        bool submit = (submitted_nodes >= ctx->device->max_nodes_per_submit) ||
+        bool submit = (submitted_nodes + 1 >= ctx->device->max_nodes_per_submit) ||
                       (flops_per_submit != 0 && batch_flops >= flops_per_submit) ||
                       (i + ctx->num_additional_fused_ops >= last_node) ||
                       (almost_ready && !ctx->almost_ready_fence_pending);
@@ -19029,7 +19107,12 @@ static bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDevicePrope
     switch (props.vendorID) {
     case VK_VENDOR_ID_INTEL:
         // Only allowing Xe2/Xe3 GPU and integrated Xe GPUs at the moment since older hardware (ex. Arc A770) has performance regressions.
-        return (arch == vk_device_architecture::INTEL_XE2) ||
+        return (getenv("GGML_VK_PTQ1_FORCE_XMX") != nullptr &&
+                getenv("GGML_VK_DISABLE_COOPMAT") == nullptr &&
+                arch == vk_device_architecture::INTEL_XE1 && props.deviceID == 0x56a1 &&
+                props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu &&
+                driver_props.driverID == vk::DriverId::eIntelProprietaryWindows) ||
+            (arch == vk_device_architecture::INTEL_XE2) ||
             (arch == vk_device_architecture::INTEL_XE1 && props.deviceType == vk::PhysicalDeviceType::eIntegratedGpu && driver_props.driverID == vk::DriverId::eIntelProprietaryWindows);
     case VK_VENDOR_ID_AMD:
         if (driver_props.driverID == vk::DriverId::eAmdProprietary || driver_props.driverID == vk::DriverId::eAmdOpenSource) {

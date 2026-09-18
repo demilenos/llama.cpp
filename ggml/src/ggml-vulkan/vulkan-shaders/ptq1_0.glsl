@@ -10,8 +10,7 @@
 //
 // Element order is not positional: a 16-byte chunk of qs where byte j carries
 // elements t*16+j, then an 8-byte chunk carrying 80 + t*8 + (j-16), then qh at four
-// trits per byte carrying 120 + t*2 + h. Trits come out by the base-3 remainder
-// recurrence t = (v*3)>>8, v = (v*3)&0xFF.
+// trits per byte carrying 120 + t*2 + h. Packed powers extract each trit directly.
 float ptq1_0_trit(uint ib, uint a_offset, uint e) {
     uint b;
     uint n;
@@ -28,10 +27,10 @@ float ptq1_0_trit(uint ib, uint a_offset, uint e) {
         n = t >> 1u;
     }
 
-    uint v = b;
-    for (uint i = 0u; i < n; ++i) {
-        v = (v * 3u) & 0xFFu;
-    }
+    const uint packed = (1u << 28) | (3u << 21) | (9u << 14) | (27u << 7) | 81u;
+    const uint power = (packed >> (7u * (4u - n))) & 127u;
+    const uint v = (b * power) & 255u;
+
     return float(int((v * 3u) >> 8u) - 1);
 }
 
