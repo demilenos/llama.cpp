@@ -17397,11 +17397,17 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             }
 
             ggml_vk_synchronize(ctx);
-            if (!ggml_vk_ptq1_external_compute(ctx, cgraph->nodes[i])) {
+            if (ggml_vk_ptq1_external_compute(ctx, cgraph->nodes[i])) {
+                first_node_in_batch = true;
+                continue;
+            }
+            if (ctx->device->external_poisoned) {
                 return GGML_STATUS_FAILED;
             }
+            // Import/export was unavailable before ownership release. The graph is
+            // synchronized here, so recording the ordinary Vulkan PTQ1 node is safe.
             first_node_in_batch = true;
-            continue;
+            submit_node_idx = i;
         }
 #endif
 
