@@ -14,6 +14,18 @@ static void check(const MoeProblem&p,const MoeOptions&o,const MoeWorkspace&w){
     if(p.layout!=Layout::native_tq2&&p.layout!=Layout::s2tile8)throw std::invalid_argument("MoE supports native or s2tile8");
     if(!w.gate||!w.up||!w.hidden||!w.down||!w.gate_status||!w.down_status||!w.hidden_invalid||!w.output_invalid)
         throw std::invalid_argument("missing persistent MoE workspace");
+
+    if(o.token_tile!=1) {
+        validate_token_tile(o.token_tile);
+        if(!o.expert_grouping || o.gate_kernel.split_k!=1 || o.down_kernel.split_k!=1)
+            throw std::invalid_argument("multi-token GEMM needs grouping and split1/1");
+        if(o.gate_tokens_per_tile!=1 || o.down_tokens_per_tile!=1)
+            throw std::invalid_argument("multi-token GEMM cannot combine with token-reuse tiles");
+        if(!w.tiles.expert||!w.tiles.begin||!w.tiles.rows||!w.tiles.count||!w.tiles.invalid||
+           w.tiles.capacity<expert_tile_capacity(size_t(p.tokens)*p.topk,p.gate_shape.experts,o.token_tile)||
+           w.tiles.expert_capacity<p.gate_shape.experts)
+            throw std::invalid_argument("missing/undersized multi-token tile plan workspace");
+    }
     if(o.expert_grouping) {
         validate_grouping_size(size_t(p.tokens)*p.topk,p.gate_shape.experts);
         if(o.path!=MoePath::a8_gluquant||o.input_group!=32||o.hidden_group!=32||p.layout!=Layout::s2tile8)
@@ -104,8 +116,9 @@ MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&requested,c
         return e;};
     DeviceProblem gate{p.gate_shape,p.tokens,p.topk,false,p.layout,p.gate,p.up,p.x,p.ids,w.gate,w.up,w.gate_status};
     DeviceProblem down{{p.gate_shape.m,p.gate_shape.k,p.gate_shape.experts},p.tokens,p.topk,true,p.layout,p.down,nullptr,w.hidden,p.ids,w.down,nullptr,w.down_status};
-    uint32_t group_ready=0,gate_tiles_ready=0,down_tiles_ready=0;
+    uint32_t group_ready=0,gate_tiles_ready=0,down_tiles_ready=0,tile_ready=0;
     const int32_t* job_order=nullptr;ExpertTokenTileView gate_tiles{},down_tiles{};
+
     if(o.expert_grouping) {
         auto gr=enqueue_expert_grouping(q,p.ids,size_t(p.tokens)*p.topk,p.gate_shape.experts,w.grouping,deps);
         auto c=add("group_count",gr.count),pr=add("group_prefix",gr.prefix,c);
@@ -126,24 +139,37 @@ MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&requested,c
                 down_tiles_ready=add("group_down_tiles",e,wait);
             }
         }
+        if(o.token_tile!=1) {
+            auto e=enqueue_expert_tiles(q,size_t(p.tokens)*p.topk,p.gate_shape.experts,o.token_tile,w.grouping,w.tiles,{gr.scatter});
+            tile_ready=add("group_tiles",e,group_ready);
+        }
     }
-    const uint32_t all_group=group_ready|gate_tiles_ready|down_tiles_ready;
+    const uint32_t all_group=group_ready|gate_tiles_ready|down_tiles_ready|tile_ready;
     uint32_t gdmask=0;
     if(o.path==MoePath::a16) {
         auto r=enqueue(q,gate,o.gate_kernel,w.gate_split,deps);gdmask=add("gate_up",r.main);
         if(r.has_reduce)gdmask=add("gate_reduce",r.done,gdmask);
     } else {
         uint32_t quant_ready=0;
-        if(!o.input_prequantized) {
+        if(o.token_tile==1 && !o.input_prequantized) {
             const auto wait=o.overlap_grouping_quant?0u:all_group;
             auto e=enqueue_a8_quant(q,p.x,ActivationType::f32,p.tokens,p.gate_shape.k,o.input_group,w.input_a8,events(wait));
             quant_ready=add("input_quant",e,wait);
         }
-        const uint32_t wait=group_ready|gate_tiles_ready|quant_ready;
+        const uint32_t wait=group_ready|gate_tiles_ready|tile_ready|quant_ready;
         // A prequantized input belongs to caller deps. They are already inherited
         // through grouping when present, and passed directly for an empty mask.
-        A8Options a{o.input_group,A8Mode::prequantized,o.gate_kernel,job_order,gate_tiles};
-        auto r=enqueue_a8(q,gate,a,w.input_a8,w.gate_split,events(wait));gdmask=add("gate_up",r.main,wait);
+        A8Run r;
+        if(o.token_tile==1) {
+            A8Options a{o.input_group,A8Mode::prequantized,o.gate_kernel,job_order,gate_tiles};
+            r=enqueue_a8(q,gate,a,w.input_a8,w.gate_split,events(wait));
+        } else {
+            const A8Mode mode=o.input_prequantized?A8Mode::prequantized:A8Mode::staged;
+            A8Options a{o.input_group,mode,o.gate_kernel,job_order,{}};
+            r=enqueue_a8_gemm(q,gate,a,w.input_a8,w.tiles,o.token_tile,events(wait));
+        }
+        uint32_t main_wait=wait;if(r.has_quant)main_wait=add("input_quant",r.quant,wait);
+        gdmask=add("gate_up",r.main,main_wait);
         if(r.has_reduce)gdmask=add("gate_reduce",r.done,gdmask);
     }
     auto gd=run.done;if(o.diagnostic_host_waits)gd.wait_and_throw();
@@ -160,8 +186,14 @@ MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&requested,c
         if(r.has_reduce)ddmask=add("down_reduce",r.done,ddmask);
     } else {
         auto mode=o.path==MoePath::a8_gluquant?A8Mode::prequantized:A8Mode::staged;
-        const uint32_t wait=hdmask|down_tiles_ready;
-        auto r=enqueue_a8(q,down,{o.hidden_group,mode,o.down_kernel,job_order,down_tiles},w.hidden_a8,w.down_split,events(wait));
+        const uint32_t wait=hdmask|down_tiles_ready|tile_ready;
+        A8Run r;
+        if(o.token_tile==1) {
+            r=enqueue_a8(q,down,{o.hidden_group,mode,o.down_kernel,job_order,down_tiles},w.hidden_a8,w.down_split,events(wait));
+        } else {
+            A8Options a{o.hidden_group,A8Mode::prequantized,o.down_kernel,job_order,{}};
+            r=enqueue_a8_gemm(q,down,a,w.hidden_a8,w.tiles,o.token_tile,events(wait));
+        }
         uint32_t main_wait=wait;if(r.has_quant)main_wait=add("hidden_quant",r.quant,wait);
         ddmask=add("down",r.main,main_wait);if(r.has_reduce)ddmask=add("down_reduce",r.done,ddmask);
     }

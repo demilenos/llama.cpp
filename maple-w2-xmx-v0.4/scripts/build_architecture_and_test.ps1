@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Compiler='', [string]$Builtins='', [string]$Device='A750',
-    [ValidateSet('smoke','quick','full')][string]$Suite='smoke',
+    [ValidateSet('smoke','quick','full','merge')][string]$Suite='smoke',
     [string]$Out='', [string]$Gate='', [string]$Up='', [string]$Down='',
     [int]$Repeats=28, [switch]$DumpContract, [switch]$BuildOnly
 )

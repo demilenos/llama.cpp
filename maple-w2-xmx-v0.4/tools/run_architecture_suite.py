@@ -9,6 +9,8 @@ from pathlib import Path
 from architecture_common import VERSION, verify_build
 QS = (1, 2, 4, 8, 16, 32, 64, 128, 184, 256, 512, 1024, 2048)
 RECIPES = ((1, 1, 0), (1, 1, 1), (2, 1, 1), (1, 2, 1), (2, 2, 1), (4, 4, 1))
+MERGE_QS = (32, 64, 128, 256, 512, 1024, 2048)
+MERGE_RECIPES = ((1, 1, 1), (2, 2, 1), (4, 4, 1))
 
 def cases_for(suite):
     if suite == "smoke":
@@ -16,10 +18,14 @@ def cases_for(suite):
                      gt=2, dt=4, overlap=1, split_gate=2, split_down=1, model_shape=False),
                 dict(name="smoke-q1-t4-1", q=1, k=512, hidden=256, experts=3, topk=1,
                      gt=4, dt=1, overlap=1, split_gate=1, split_down=1, model_shape=False)]
-    qs = (1, 13, 184, 512) if suite == "quick" else QS
+    if suite == "merge": 
+        qs, recipes = MERGE_QS, MERGE_RECIPES
+    else:
+        qs = (1, 13, 184, 512) if suite == "quick" else QS
+        recipes = RECIPES
     return [dict(name=f"q{q:04d}-t{gt}-{dt}-fork{overlap}", q=q, k=2048, hidden=512, experts=256,
                  topk=8, gt=gt, dt=dt, overlap=overlap, split_gate=1, split_down=1, model_shape=True)
-            for q in qs for gt, dt, overlap in RECIPES]
+            for q in qs for gt, dt, overlap in recipes]
 
 def command_for(case, a):
     args = [str(a.exe), "--device", a.device, "--out", str(a.out / case["name"]),
@@ -38,7 +44,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", type=Path, default=Path("build/maple-architecture-compare.exe"))
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--suite", choices=("smoke", "quick", "full"), default="smoke")
+    ap.add_argument("--suite", choices=("smoke", "quick", "full", "merge"), default="smoke")
     ap.add_argument("--device", default="A750")
     ap.add_argument("--repeats", type=int, default=28)
     ap.add_argument("--timeout", type=float, default=1800)

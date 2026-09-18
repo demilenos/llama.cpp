@@ -299,6 +299,11 @@ sycl::event enqueue_a8_quant(sycl::queue& q,const void* x,ActivationType type,ui
         default:return quantize<256>(q,p,w,deps);
     }
 }
+sycl::event enqueue_quantize_a8_g32(sycl::queue& q,const DeviceProblem& p,A8Workspace w,const std::vector<sycl::event>& deps) {
+    if(!p.x||!p.tokens||!p.topk||!p.shape.k) throw std::invalid_argument("invalid G32 quantizer view");
+    const uint32_t rows=p.tokens*(p.per_selection?p.topk:1);
+    return enqueue_a8_quant(q,p.x,p.activation_type,rows,p.shape.k,32,w,deps);
+}
 void run_s2s8_probe(sycl::queue& q) {
     check_device(q.get_device());
     constexpr int cases=36;

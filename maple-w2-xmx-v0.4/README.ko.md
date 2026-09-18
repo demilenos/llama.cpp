@@ -142,3 +142,17 @@ python tools/apply_architecture_port.py --target C:\AI\llama-src\YOUR_W2_MODULE 
 이 port는 기존 XMX 모듈의 MoE 범위를 개선한다. full-router/QKV의 ggml graph replacement, Vulkan↔SYCL memory import·queue handoff, persistent work-stealing scheduler, DPAS RepeatCount>1 GEMM, 실제 모델 perplexity/code-task 평가까지 구현했다고 주장하지 않는다. 특히 다른 runtime의 VkBuffer나 raw device 주소를 USM으로 직접 넘기지 않는다.
 
 기존 README는 `README.v0.4.ko.md`에 보존했다. 원본 `FILE_SHA256SUMS.txt`/`SOURCE_PROVENANCE.json`는 v0.4의 과거 기록이다. 이 port의 현재 identity는 `PORT_SHA256SUMS.txt`, `PORT_PROVENANCE.json`이다.
+
+
+## v0.4 merge matrix
+
+The merge suite runs 21 paired baseline/candidate cases: Q={32,64,128,256,512,1024,2048} × T={1,2,4}. Gate and down token tiles use the same T, fork/join is enabled, and G32/H32, split1/1, local4, top-k8 remain fixed.
+
+```powershell
+python tools/run_architecture_suite.py `
+  --exe build/maple-architecture-compare.exe `
+  --device A750 --suite merge --out build/arch-merge `
+  --gate C:\path\to\gate.mw2 `
+  --up C:\path\to\up.mw2 `
+  --down C:\path\to\down.mw2
+```

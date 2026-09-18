@@ -41,6 +41,9 @@ A8Run enqueue_a8(sycl::queue&,const DeviceProblem&,A8Options,A8Workspace,float* 
 // and stage isolation. Does not inspect IDs or weights; dependencies own x lifetime.
 sycl::event enqueue_a8_quant(sycl::queue&,const void* x,ActivationType,uint32_t rows,
     uint32_t k,uint32_t group,A8Workspace,const std::vector<sycl::event>& dependencies={});
+// Shared, unchanged G32 quantizer used by the v0.5 multi-token consumer.
+sycl::event enqueue_quantize_a8_g32(sycl::queue&,const DeviceProblem&,A8Workspace,
+    const std::vector<sycl::event>& dependencies={});
 // Internal opt-in grouped reuse dispatch. Public enqueue_a8 validates its views.
 A8Run enqueue_a8_token_tiles(sycl::queue&,const DeviceProblem&,A8Options,A8Workspace,
     float* split_scratch,const std::vector<sycl::event>& dependencies);

@@ -4,6 +4,7 @@
 #include <array>
 #include "expert_grouping.hpp"
 #include "moe_dispatch_policy.hpp"
+#include "maple_w2a8_gemm.hpp"
 namespace maple_w2 {
 enum class MoePath { a16, a8_separate, a8_gluquant };
 struct MoeOptions {
@@ -24,6 +25,8 @@ struct MoeOptions {
     uint32_t gate_tokens_per_tile=1,down_tokens_per_tile=1;
     // Caller supplies fresh input_a8 AND completion dependencies. Not a cache.
     bool input_prequantized=false;
+    // v0.5: 1 retains the v0.4 grouped matvec; 4/8 share W2 across activation rows.
+    uint32_t token_tile=1;
 };
 struct MoeProblem {
     Shape gate_shape; // {input width, expert hidden width, experts}; down={hidden,input,experts}
@@ -43,6 +46,7 @@ struct MoeWorkspace {
     int32_t *output_invalid=nullptr; // Q*K, overwritten by weighted sum
     ExpertGroupingWorkspace grouping{};
     ExpertTokenTileView gate_tiles{},down_tiles{};
+    ExpertTilesWorkspace tiles{};
 };
 struct MoeStage {const char* label="";sycl::event event;uint32_t parents=0;};
 struct MoeRun {

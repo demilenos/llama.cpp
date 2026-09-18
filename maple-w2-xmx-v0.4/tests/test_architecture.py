@@ -18,6 +18,13 @@ class ArchitectureTests(unittest.TestCase):
         self.assertEqual(len(suite.cases_for('smoke')),2)
         self.assertEqual(len(suite.cases_for('quick')),24)
         self.assertEqual(len(suite.cases_for('full')),len(suite.QS)*6)
+        merge=suite.cases_for('merge')
+        self.assertEqual(len(merge),len(suite.MERGE_QS)*3)
+        self.assertEqual([c['q'] for c in merge[:3]], [32,32,32])
+        self.assertEqual({c['gt'] for c in merge}, {1,2,4})
+        self.assertTrue(all(c['gt']==c['dt'] for c in merge))
+        self.assertTrue(all(c['overlap']==1 for c in merge))
+        self.assertTrue(all(c['q'] in suite.MERGE_QS for c in merge))
     def test_cmd_shape(self):
         a=argparse.Namespace(exe=Path('a.exe'),out=Path('out'),device='A750',repeats=28,dump_contract=True,gate=None,up=None,down=None)
         for c in suite.cases_for('quick'):
