@@ -320,7 +320,9 @@ static void ggml_vk_print_device_lost_info(const vk_device& device);
 
 // Prevent simultaneous submissions to the same queue.
 struct vk_queue_handle {
+#ifdef GGML_VULKAN_PTQ1_XMX
     std::recursive_mutex external_mutex;
+#endif
     vk::Queue queue;
     vk_device_ref device;
     virtual void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) = 0;
@@ -332,7 +334,9 @@ struct vk_queue_handle {
 struct vk_queue_handle_synchronized : vk_queue_handle {
     std::mutex mutex;
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+#ifdef GGML_VULKAN_PTQ1_XMX
         std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
+#endif
         std::lock_guard<std::mutex> guard(mutex);
         try {
             queue.submit(submits, fence);
@@ -349,7 +353,9 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
 
 struct vk_queue_handle_unsynchronized : vk_queue_handle {
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+#ifdef GGML_VULKAN_PTQ1_XMX
         std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
+#endif
         // Driver guarantees internal synchronization via VK_KHR_internally_synchronized_queues
         try {
             queue.submit(submits, fence);
