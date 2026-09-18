@@ -7,9 +7,9 @@
 #include "maple_ptq1a8.hpp"
 #include "maple_w2a8.hpp"
 
+#include <level_zero/ze_api.h>
 #include <sycl/ext/oneapi/backend/level_zero.hpp>
 #include <sycl/sycl.hpp>
-#include <level_zero/ze_api.h>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -67,9 +68,15 @@ uint32_t local_size_for(uint32_t token_tile) {
     return local;
 }
 
+ze_command_list_handle_t & xmx_immediate_list_slot() {
+    static ze_command_list_handle_t list = nullptr;
+    return list;
+}
+
 sycl::queue & xmx_queue() {
-    // Deliberately process-lifetime. The explicit runtime shutdown below drains
-    // USM/imported allocations while this Level Zero context is still alive.
+#if !defined(SYCL_EXT_ONEAPI_BACKEND_LEVEL_ZERO) || SYCL_EXT_ONEAPI_BACKEND_LEVEL_ZERO < 4
+#error "PTQ1 async XMX requires Level Zero backend interop v4+"
+#endif
     static sycl::queue * result = nullptr;
     static std::once_flag once;
     std::call_once(once, [] {
@@ -90,13 +97,56 @@ sycl::queue & xmx_queue() {
         }
         if (!found) throw std::runtime_error("PTQ1 XMX requires Intel Arc A750/A770 Level Zero");
 
-        result = new sycl::queue(
-            sycl::context(selected),
+        sycl::context context(selected);
+        const auto ze_context =
+            sycl::get_native<sycl::backend::ext_oneapi_level_zero>(context);
+        const auto ze_device =
+            sycl::get_native<sycl::backend::ext_oneapi_level_zero>(selected);
+
+        uint32_t group_count = 0;
+        require(zeDeviceGetCommandQueueGroupProperties(
+                    ze_device, &group_count, nullptr) == ZE_RESULT_SUCCESS &&
+                group_count > 0,
+                "PTQ1 XMX cannot query Level Zero queue groups");
+        std::vector<ze_command_queue_group_properties_t> groups(group_count);
+        for (auto & group : groups) {
+            group.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+        }
+        require(zeDeviceGetCommandQueueGroupProperties(
+                    ze_device, &group_count, groups.data()) == ZE_RESULT_SUCCESS,
+                "PTQ1 XMX cannot read Level Zero queue groups");
+
+        uint32_t ordinal = UINT32_MAX;
+        for (uint32_t i = 0; i < group_count; ++i) {
+            if ((groups[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE) != 0 &&
+                groups[i].numQueues > 0) {
+                ordinal = i;
+                break;
+            }
+        }
+        require(ordinal != UINT32_MAX, "PTQ1 XMX lacks a Level Zero compute queue group");
+
+        ze_command_queue_desc_t desc{};
+        desc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+        desc.ordinal = ordinal;
+        desc.index = 0;
+        desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+        desc.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+
+        auto & immediate = xmx_immediate_list_slot();
+        require(zeCommandListCreateImmediate(
+                    ze_context, ze_device, &desc, &immediate) == ZE_RESULT_SUCCESS &&
+                immediate != nullptr,
+                "PTQ1 XMX cannot create asynchronous Level Zero immediate command list");
+
+        constexpr auto backend = sycl::backend::ext_oneapi_level_zero;
+        sycl::backend_input_t<backend, sycl::queue> input{
+            std::variant<ze_command_queue_handle_t, ze_command_list_handle_t>{immediate},
             selected,
-            [](sycl::exception_list errors) {
-                for (const auto & error : errors) std::rethrow_exception(error);
-            },
-            sycl::property_list{sycl::property::queue::in_order{}});
+            sycl::ext::oneapi::level_zero::ownership::keep,
+            sycl::property_list{sycl::property::queue::in_order{}}};
+
+        result = new sycl::queue(sycl::make_queue<backend>(input, context));
     });
     return *result;
 }
@@ -125,30 +175,31 @@ struct ReusableBuffer {
     sycl::queue * queue = nullptr;
     T * data = nullptr;
     size_t capacity = 0;
+    std::vector<T *> retired;
 
     ~ReusableBuffer() {
-        if (data && queue) {
-            try { queue->wait_and_throw(); } catch (...) {}
-            sycl::free(data, *queue);
-        }
+        if (!queue) return;
+        try { queue->wait_and_throw(); } catch (...) {}
+        if (data) sycl::free(data, *queue);
+        for (auto * old : retired) if (old) sycl::free(old, *queue);
     }
 
     void ensure(sycl::queue & q, size_t count) {
         if (count <= capacity) return;
-        if (data) {
-            q.wait_and_throw();
-            sycl::free(data, q);
-        }
-        data = sycl::malloc_device<T>(count, q);
-        if (!data) throw std::bad_alloc();
+        T * next = sycl::malloc_device<T>(count, q);
+        if (!next) throw std::bad_alloc();
+        if (data) retired.push_back(data);
+        data = next;
         queue = &q;
         capacity = count;
     }
 
     void reset() {
-        if (!data || !queue) return;
+        if (!queue) return;
         queue->wait_and_throw();
-        sycl::free(data, *queue);
+        if (data) sycl::free(data, *queue);
+        for (auto * old : retired) if (old) sycl::free(old, *queue);
+        retired.clear();
         data = nullptr;
         queue = nullptr;
         capacity = 0;
@@ -159,6 +210,8 @@ struct Runtime {
     sycl::queue * queue = nullptr;
     ze_context_handle_t ze_context = nullptr;
     ze_device_handle_t ze_device = nullptr;
+    ze_external_semaphore_ext_handle_t external_timeline = nullptr;
+    void * external_timeline_source = nullptr;
     bool identity_checked = false;
     std::unordered_map<uint64_t, std::shared_ptr<ImportedAllocation>> imports;
     ReusableBuffer<int32_t> ids;
@@ -233,7 +286,7 @@ void * import_tensor(
         const ggml_tensor * tensor,
         size_t alignment) {
     ggml_vk_external_span span{};
-    require(api && api->abi_version == 1 && api->get_span &&
+    require(api && api->abi_version >= 1 && api->get_span &&
             api->get_span(lease, tensor, &span),
             "PTQ1 XMX Vulkan tensor is not exportable");
     Handle handle{static_cast<HANDLE>(span.memory_handle)};
@@ -291,6 +344,62 @@ void * import_tensor(
     return static_cast<uint8_t *>(allocation.base) + offset;
 }
 
+
+void ensure_external_timeline(Runtime & state, const ggml_vk_external_timeline & sync) {
+    require(sync.semaphore_handle && sync.wait_value && sync.signal_value,
+            "PTQ1 XMX invalid Vulkan timeline handoff");
+    if (state.external_timeline) {
+        require(state.external_timeline_source == sync.semaphore_handle,
+                "PTQ1 XMX Vulkan timeline identity changed");
+        return;
+    }
+
+    ze_external_semaphore_win32_ext_desc_t win32{};
+    win32.stype = ZE_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_WIN32_EXT_DESC;
+    win32.handle = sync.semaphore_handle;
+    win32.name = nullptr;
+
+    ze_external_semaphore_ext_desc_t desc{};
+    desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_EXT_DESC;
+    desc.pNext = &win32;
+    desc.flags = ZE_EXTERNAL_SEMAPHORE_EXT_FLAG_VK_TIMELINE_SEMAPHORE_WIN32;
+
+    require(zeDeviceImportExternalSemaphoreExt(
+                state.ze_device, &desc, &state.external_timeline) == ZE_RESULT_SUCCESS &&
+            state.external_timeline != nullptr,
+            "PTQ1 XMX cannot import Vulkan timeline semaphore into Level Zero");
+    state.external_timeline_source = sync.semaphore_handle;
+}
+
+void append_external_wait(Runtime & state, uint64_t value) {
+    auto list = xmx_immediate_list_slot();
+    require(list && state.external_timeline, "PTQ1 XMX timeline wait not initialized");
+    ze_external_semaphore_wait_params_ext_t params{};
+    params.stype = ZE_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_WAIT_PARAMS_EXT;
+    params.value = value;
+    auto semaphore = state.external_timeline;
+    require(zeCommandListAppendWaitExternalSemaphoreExt(
+                list, 1, &semaphore, &params, nullptr, 0, nullptr) == ZE_RESULT_SUCCESS,
+            "PTQ1 XMX Level Zero timeline wait enqueue failed");
+}
+
+void append_external_signal(Runtime & state, uint64_t value) {
+    auto list = xmx_immediate_list_slot();
+    require(list && state.external_timeline, "PTQ1 XMX timeline signal not initialized");
+    ze_external_semaphore_signal_params_ext_t params{};
+    params.stype = ZE_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS_EXT;
+    params.value = value;
+    auto semaphore = state.external_timeline;
+    require(zeCommandListAppendSignalExternalSemaphoreExt(
+                list, 1, &semaphore, &params, nullptr, 0, nullptr) == ZE_RESULT_SUCCESS,
+            "PTQ1 XMX Level Zero timeline signal enqueue failed");
+}
+
+bool validation_enabled() {
+    const char * value = std::getenv("GGML_VULKAN_PTQ1_XMX_VALIDATE");
+    return value && std::strcmp(value, "1") == 0;
+}
+
 bool supported(const ggml_tensor * node) {
     if (!enabled() || !node || node->op != GGML_OP_MUL_MAT ||
         !node->src[0] || !node->src[1]) return false;
@@ -332,7 +441,8 @@ bool execute(
         ggml_vk_external_lease * lease,
         const ggml_vk_external_api * api) {
     try {
-        if (!supported(node) || !lease || !api || !api->release_to_external) return false;
+        if (!supported(node) || !lease || !api || api->abi_version < 2 ||
+            !api->release_to_external_async) return false;
         std::lock_guard<std::mutex> lock(runtime_mutex());
         auto & state = runtime();
         auto & q = *state.queue;
@@ -384,23 +494,33 @@ bool execute(
         workspace.scales = state.a8_scales.data;
         workspace.invalid = state.invalid.data;
 
-        require(api->release_to_external(lease), "PTQ1 XMX Vulkan ownership release failed");
+        ggml_vk_external_timeline sync{};
+        require(api->release_to_external_async(lease, &sync),
+                "PTQ1 XMX Vulkan async ownership release failed");
+        ensure_external_timeline(state, sync);
 
+        // One physical L0 immediate command list:
+        // Vulkan timeline wait -> staged A8 -> PTQ1 XMX -> Vulkan timeline signal.
+        // No host fence/readback exists on the default critical path.
+        append_external_wait(state, sync.wait_value);
         auto run = maple_w2::enqueue_a8(q, problem, options, workspace, nullptr);
-        run.done.wait_and_throw();
+        append_external_signal(state, sync.signal_value);
 
-        std::vector<int32_t> status(tokens);
-        std::vector<int32_t> invalid(a8_groups);
-        q.memcpy(status.data(), state.status.data, tokens * sizeof(int32_t));
-        q.memcpy(invalid.data(), state.invalid.data, a8_groups * sizeof(int32_t));
-        q.wait_and_throw();
-        for (int32_t value : status) require(value == 0, "PTQ1 XMX device status failure");
-        for (int32_t value : invalid) require(value == 0, "PTQ1 XMX activation contains non-finite data");
+        if (validation_enabled()) {
+            run.done.wait_and_throw();
+            std::vector<int32_t> status(tokens);
+            std::vector<int32_t> invalid(a8_groups);
+            q.memcpy(status.data(), state.status.data, tokens * sizeof(int32_t));
+            q.memcpy(invalid.data(), state.invalid.data, a8_groups * sizeof(int32_t));
+            q.wait_and_throw();
+            for (int32_t value : status) require(value == 0, "PTQ1 XMX device status failure");
+            for (int32_t value : invalid) require(value == 0, "PTQ1 XMX activation contains non-finite data");
+        }
 
         static std::atomic<uint32_t> logs{0};
         if (logs.fetch_add(1) < 8) {
             std::fprintf(stderr,
-                "ptq1-xmx m=%u n=%u k=%u group=%u staged_a8=1 native=1 tile=%u local=%u imports=%llu cache_hits=%llu\n",
+                "ptq1-xmx m=%u n=%u k=%u group=%u device_a8_staged=1 external_mem=1 async_timeline=1 tile=%u local=%u imports=%llu cache_hits=%llu\n",
                 m, tokens, k, a8_group,
                 options.ptq1_token_tile, options.kernel.local_size,
                 (unsigned long long) state.imports_created,
@@ -427,6 +547,13 @@ void llama_ptq1_xmx_shutdown() {
         state->a8_q.reset();
         state->a8_scales.reset();
         state->invalid.reset();
+        if (state->external_timeline) {
+            require(zeDeviceReleaseExternalSemaphoreExt(
+                        state->external_timeline) == ZE_RESULT_SUCCESS,
+                    "PTQ1 XMX external timeline release failed");
+            state->external_timeline = nullptr;
+            state->external_timeline_source = nullptr;
+        }
         // Imported mappings own the Vulkan allocations. Release the Level Zero
         // import before dropping those source owners.
         state->imports.clear();
