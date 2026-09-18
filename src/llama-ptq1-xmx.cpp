@@ -39,6 +39,34 @@ bool enabled() {
     return value && std::strcmp(value, "1") == 0;
 }
 
+uint32_t env_u32(const char * name, uint32_t fallback) {
+    const char * value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    char * end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    require(end && *end == '\0' && parsed <= UINT32_MAX, "PTQ1 XMX invalid numeric environment value");
+    return static_cast<uint32_t>(parsed);
+}
+
+uint32_t token_tile_for(uint32_t tokens) {
+    const char * forced = std::getenv("GGML_VULKAN_PTQ1_XMX_TILE");
+    if (forced && *forced) {
+        const uint32_t tile = env_u32("GGML_VULKAN_PTQ1_XMX_TILE", 1);
+        require(tile == 1 || tile == 2 || tile == 4, "PTQ1 XMX tile must be 1, 2 or 4");
+        return tile;
+    }
+    if (tokens == 2) return 2;
+    if (tokens == 4) return 4;
+    return 1;
+}
+
+uint32_t local_size_for(uint32_t token_tile) {
+    const uint32_t local = env_u32("GGML_VULKAN_PTQ1_XMX_LOCAL_SIZE", token_tile > 1 ? 8u : 4u);
+    require(local == 4 || local == 8 || local == 16 || local == 32,
+            "PTQ1 XMX local size must be 4, 8, 16 or 32");
+    return local;
+}
+
 sycl::queue & xmx_queue() {
     // Deliberately process-lifetime. The explicit runtime shutdown below drains
     // USM/imported allocations while this Level Zero context is still alive.
@@ -348,7 +376,8 @@ bool execute(
         options.group = a8_group;
         options.mode = maple_w2::A8Mode::staged;
         options.kernel.split_k = 1;
-        options.kernel.local_size = 4;
+        options.ptq1_token_tile = token_tile_for(tokens);
+        options.kernel.local_size = local_size_for(options.ptq1_token_tile);
 
         maple_w2::A8Workspace workspace{};
         workspace.q = state.a8_q.data;
@@ -371,8 +400,9 @@ bool execute(
         static std::atomic<uint32_t> logs{0};
         if (logs.fetch_add(1) < 8) {
             std::fprintf(stderr,
-                "ptq1-xmx m=%u n=%u k=%u group=%u staged_a8=1 native=1 imports=%llu cache_hits=%llu\n",
+                "ptq1-xmx m=%u n=%u k=%u group=%u staged_a8=1 native=1 tile=%u local=%u imports=%llu cache_hits=%llu\n",
                 m, tokens, k, a8_group,
+                options.ptq1_token_tile, options.kernel.local_size,
                 (unsigned long long) state.imports_created,
                 (unsigned long long) state.cache_hits);
         }
