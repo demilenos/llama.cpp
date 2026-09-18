@@ -175,7 +175,7 @@ static bool ggml_vk_external_timeline_init(ggml_backend_vk_context * ctx) {
         }
         if (t.semaphore) {
             ctx->device->device.destroySemaphore(t.semaphore);
-            t.semaphore = {};
+            t.semaphore = vk::Semaphore{};
         }
         return false;
     }
@@ -308,7 +308,7 @@ static void ggml_vk_external_timeline_cleanup(ggml_backend_vk_context * ctx) {
     }
     if (t.semaphore) {
         ctx->device->device.destroySemaphore(t.semaphore);
-        t.semaphore = {};
+        t.semaphore = vk::Semaphore{};
     }
     t.value = 0;
 #else
