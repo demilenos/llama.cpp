@@ -5880,9 +5880,9 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         int idx = 0;
         const uint32_t sg = std::max(device->subgroup_size, 1u);
         for (uint32_t n : {64, 128, 256, 512, 1024, 2048, 4096, 8192}) {
-            const bool wide = n > GGML_VK_FWHT_MAX_SUBGROUP_N || n / sg > GGML_VK_FWHT_MAX_SUBGROUP_EL_W ||
-                (n == 1024 && device->vendor_id == VK_VENDOR_ID_INTEL && device->properties.deviceID == 0x56a1 &&
-                 getenv("GGML_VK_A750_FWHT_SHMEM") != nullptr);
+            const bool force_a750_shmem = n == 1024 && device->vendor_id == VK_VENDOR_ID_INTEL &&
+                device->properties.deviceID == 0x56a1 && getenv("GGML_VK_A750_FWHT_SHMEM") != nullptr;
+            const bool wide = n > GGML_VK_FWHT_MAX_SUBGROUP_N || n / sg > GGML_VK_FWHT_MAX_SUBGROUP_EL_W || force_a750_shmem;
             if (use_subgroup && !wide) {
                 if (device->subgroup_size <= n) {
                     ggml_vk_create_pipeline(device, device->pipeline_fwht_f32[idx], "fwht_f32", fwht_f32_len, fwht_f32_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { device->subgroup_size, n, GGML_VK_FWHT_ROWS }, 1, true, true, device->subgroup_size);
@@ -5894,13 +5894,33 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 }
             } else {
                 // wide blocks trade rows per workgroup for a smaller register block
-                const uint32_t block_size = wide ? std::min(n, 256u) : std::min(sg, n);
-                const uint32_t rows       = wide ? 1u : GGML_VK_FWHT_ROWS;
+                uint32_t block_size = wide ? std::min(n, 256u) : std::min(sg, n);
+                const uint32_t rows = wide ? 1u : GGML_VK_FWHT_ROWS;
+                if (force_a750_shmem) {
+                    if (const char * value = getenv("GGML_VK_A750_FWHT_WG")) {
+                        block_size = 0;
+                        for (uint32_t candidate : {64u, 128u, 256u, 512u, 1024u}) {
+                            if (std::string(value) == std::to_string(candidate)) {
+                                block_size = candidate;
+                                break;
+                            }
+                        }
+                        if (block_size == 0 || block_size > device->properties.limits.maxComputeWorkGroupInvocations ||
+                            block_size > device->properties.limits.maxComputeWorkGroupSize[0]) {
+                            throw std::runtime_error("GGML_VK_A750_FWHT_WG requires a supported workgroup size: 64,128,256,512,1024");
+                        }
+                    }
+                }
+                const bool hybrid = force_a750_shmem && getenv("GGML_VK_A750_FWHT_HYBRID") != nullptr;
+                if (hybrid && (!device->subgroup_basic || !device->subgroup_shuffle || !device->subgroup_size_control ||
+                    !device->subgroup_require_full_support || device->subgroup_min_size > 16 || device->subgroup_max_size < 16)) {
+                    throw std::runtime_error("GGML_VK_A750_FWHT_HYBRID requires full subgroup16 and shuffle support");
+                }
                 if ((uint64_t)rows * n * sizeof(float) <= device->properties.limits.maxComputeSharedMemorySize &&
                     block_size * rows <= device->properties.limits.maxComputeWorkGroupInvocations) {
-                    ggml_vk_create_pipeline(device, device->pipeline_fwht_f32[idx], "fwht_shmem_f32", fwht_shmem_f32_len, fwht_shmem_f32_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { block_size, n, rows }, 1);
+                    ggml_vk_create_pipeline(device, device->pipeline_fwht_f32[idx], hybrid ? "fwht_hybrid_f32" : "fwht_shmem_f32", hybrid ? fwht_hybrid_f32_len : fwht_shmem_f32_len, hybrid ? fwht_hybrid_f32_data : fwht_shmem_f32_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { block_size, n, rows }, 1, false, hybrid, hybrid ? 16u : 0u);
                     if (device->fp16) {
-                        ggml_vk_create_pipeline(device, device->pipeline_fwht_f16[idx], "fwht_shmem_f16", fwht_shmem_f16_len, fwht_shmem_f16_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { block_size, n, rows }, 1);
+                        ggml_vk_create_pipeline(device, device->pipeline_fwht_f16[idx], hybrid ? "fwht_hybrid_f16" : "fwht_shmem_f16", hybrid ? fwht_hybrid_f16_len : fwht_shmem_f16_len, hybrid ? fwht_hybrid_f16_data : fwht_shmem_f16_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { block_size, n, rows }, 1, false, hybrid, hybrid ? 16u : 0u);
                     }
                     device->fwht_rows_per_wg[idx] = rows;
                 }

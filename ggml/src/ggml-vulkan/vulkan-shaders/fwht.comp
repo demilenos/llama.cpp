@@ -4,7 +4,7 @@
 #ifdef FWHT_F16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #endif
-#ifndef FWHT_SHMEM
+#if !defined(FWHT_SHMEM) || defined(FWHT_HYBRID)
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_KHR_shader_subgroup_shuffle : enable
 #endif
@@ -40,7 +40,12 @@ shared float shmem[ROWS * N];
 
 void main() {
 #ifdef FWHT_SHMEM
+#ifdef FWHT_HYBRID
+    // Logical IDs keep shuffle partners identical to the shared butterfly layout.
+    const uint tid = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
+#else
     const uint tid = gl_LocalInvocationID.x;
+#endif
     const uint shmem_base = gl_LocalInvocationID.y * N;
     const uint row_id = gl_LocalInvocationID.y;
 #else
@@ -65,11 +70,23 @@ void main() {
         [[unroll]]
         for (uint i = 0; i < EL_W; ++i) {
             reg[i] = row < n_rows ? float(data_a[src_offset + row_offset + i * BLOCK_SIZE + tid]) * scale : 0.0;
+
         }
 
 #ifdef FWHT_SHMEM
         [[unroll]]
         for (uint h = 1; h < BLOCK_SIZE; h <<= 1) {
+#ifdef FWHT_HYBRID
+            // CUDA fwht_cuda_block: shuffle within a subgroup, shared memory across it.
+            if (h < gl_SubgroupSize) {
+                [[unroll]] for (uint j = 0; j < EL_W; ++j) {
+                    const float val = reg[j];
+                    const float other = subgroupShuffleXor(val, h);
+                    reg[j] = (tid & h) == 0 ? val + other : other - val;
+                }
+                continue;
+            }
+#endif
             [[unroll]]
             for (uint i = 0; i < EL_W; ++i) {
                 shmem[shmem_base + i * BLOCK_SIZE + tid] = reg[i];
