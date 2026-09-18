@@ -98,6 +98,42 @@ pack_native_s2(es::simd<uint16_t,256> raw,uint32_t k32) {
     }
     return b;
 }
+
+// Prism PTQ1_0 decoder. The byte/trit mapping mirrors dequantize_row_ptq1_0,
+// but only materializes the K32 fragment needed by one DPAS instruction.
+SYCL_ESIMD_FUNCTION int ptq1_native_value(const uint8_t * block,uint32_t i) {
+    uint32_t bi=0,n=0;
+    if(i<80) {
+        bi=i%16; n=i/16;
+    } else if(i<120) {
+        const uint32_t t=i-80;
+        bi=16+t%8; n=t/8;
+    } else {
+        const uint32_t t=i-120;
+        bi=24+t%2; n=t/2;
+    }
+    const uint32_t p3=n==0?1u:(n==1?3u:(n==2?9u:(n==3?27u:81u)));
+    const uint8_t q=uint8_t(uint32_t(block[bi])*p3);
+    return int((uint32_t(q)*3u)>>8)-1;
+}
+
+SYCL_ESIMD_FUNCTION es::simd<uint32_t,16>
+pack_native_ptq1(const uint8_t * base,size_t row_stride,uint32_t k32) {
+    es::simd<uint32_t,16> b=0u;
+    const uint32_t half=k32/128;
+    const uint32_t local=k32%128;
+    #pragma unroll
+    for(int r=0;r<8;++r) {
+        const uint8_t * block=base+size_t(r)*row_stride+size_t(half)*ptq1_block_bytes;
+        #pragma unroll
+        for(int j=0;j<32;++j) {
+            const int v=ptq1_native_value(block,local+uint32_t(j));
+            const uint32_t lane=uint32_t((j/16)*8+r);
+            b[lane]=b[lane]|((uint32_t(v)&3u)<<(2*(j%16)));
+        }
+    }
+    return b;
+}
 template<int G,Layout L,bool Pair,bool Fused,bool Grouped=false>
 static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspace w,float* scratch,
                            const std::vector<sycl::event>& deps) {
@@ -129,7 +165,8 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
             if(eid>=0 && uint32_t(eid)<p.shape.experts) {
                 const size_t xr=p.per_selection?job:job/p.topk;
                 const uint32_t nk=p.shape.k/256, nsp=nk/opt.kernel.split_k;
-                const size_t row_stride=size_t(nk)*66;
+                constexpr size_t native_stride=L==Layout::native_ptq1 ? 2*ptq1_block_bytes : block_bytes;
+                const size_t row_stride=size_t(nk)*native_stride;
                 const size_t eb=size_t(eid)*p.shape.m*row_stride;
                 constexpr size_t tile_stride=L==Layout::ptq1_s2tile8 ? ptq1_tile_bytes : tile_bytes;
                 const size_t tb=(size_t(eid)*rt_count+rt)*nk*tile_stride;
@@ -141,12 +178,23 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                     if constexpr(L==Layout::native_tq2) {
                         #pragma unroll
                         for(int r=0;r<8;++r) {
-                            const size_t wb=eb+size_t(rt*8+r)*row_stride+size_t(kb)*66;
+                            const size_t wb=eb+size_t(rt*8+r)*row_stride+size_t(kb)*block_bytes;
                             raw0.template select<32,1>(r*32)=es::gather<uint16_t,32>(reinterpret_cast<const uint16_t*>(p.w0+wb),off16);
                             ds0[r]=*reinterpret_cast<const uint16_t*>(p.w0+wb+64);
                             if constexpr(Pair) {
                                 raw1.template select<32,1>(r*32)=es::gather<uint16_t,32>(reinterpret_cast<const uint16_t*>(p.w1+wb),off16);
                                 ds1[r]=*reinterpret_cast<const uint16_t*>(p.w1+wb+64);
+                            }
+                        }
+                    } else if constexpr(L==Layout::native_ptq1) {
+                        #pragma unroll
+                        for(int r=0;r<8;++r) {
+                            const size_t wb=eb+size_t(rt*8+r)*row_stride+size_t(kb)*2*ptq1_block_bytes;
+                            ds0[r]=*reinterpret_cast<const uint16_t*>(p.w0+wb+26);
+                            ds0_hi[r]=*reinterpret_cast<const uint16_t*>(p.w0+wb+ptq1_block_bytes+26);
+                            if constexpr(Pair) {
+                                ds1[r]=*reinterpret_cast<const uint16_t*>(p.w1+wb+26);
+                                ds1_hi[r]=*reinterpret_cast<const uint16_t*>(p.w1+wb+ptq1_block_bytes+26);
                             }
                         }
                     } else if constexpr(L==Layout::ptq1_s2tile8) {
@@ -166,14 +214,14 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                     }
                     es::simd<sycl::half,8> hd0=ds0.template bit_cast_view<sycl::half>();
                     es::simd<float,8> dw0=es::convert<float>(hd0),dw1,dw0_hi,dw1_hi;
-                    if constexpr(L==Layout::ptq1_s2tile8) {
+                    if constexpr(L==Layout::ptq1_s2tile8 || L==Layout::native_ptq1) {
                         es::simd<sycl::half,8> hd0_hi=ds0_hi.template bit_cast_view<sycl::half>();
                         dw0_hi=es::convert<float>(hd0_hi);
                     }
                     if constexpr(Pair) {
                         es::simd<sycl::half,8> hd1=ds1.template bit_cast_view<sycl::half>();
                         dw1=es::convert<float>(hd1);
-                        if constexpr(L==Layout::ptq1_s2tile8) {
+                        if constexpr(L==Layout::ptq1_s2tile8 || L==Layout::native_ptq1) {
                             es::simd<sycl::half,8> hd1_hi=ds1_hi.template bit_cast_view<sycl::half>();
                             dw1_hi=es::convert<float>(hd1_hi);
                         }
@@ -215,6 +263,10 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                             if constexpr(L==Layout::native_tq2) {
                                 b0=pack_native_s2(raw0,kg+sub);
                                 if constexpr(Pair) b1=pack_native_s2(raw1,kg+sub);
+                            } else if constexpr(L==Layout::native_ptq1) {
+                                const size_t wb=eb+size_t(rt*8)*row_stride+size_t(kb)*2*ptq1_block_bytes;
+                                b0=pack_native_ptq1(p.w0+wb,row_stride,kg+sub);
+                                if constexpr(Pair) b1=pack_native_ptq1(p.w1+wb,row_stride,kg+sub);
                             } else {
                                 es::simd<uint32_t,16> bo(0,4);
                                 const size_t wb=tb+size_t(kb)*tile_stride+size_t((kg+sub)/32)*64;
@@ -228,7 +280,7 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                             if constexpr(Pair) ia1=xmx::dpas<8,1,int32_t,int32_t,uint32_t,int8_t,
                                 xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(ia1,b1,a32);
                         }
-                        if constexpr(L==Layout::ptq1_s2tile8) {
+                        if constexpr(L==Layout::ptq1_s2tile8 || L==Layout::native_ptq1) {
                             const es::simd<float,8> sw0=kg<128 ? dw0 : dw0_hi;
                             acc0+=es::convert<float>(ia0)*(sw0*da);
                             if constexpr(Pair) {
@@ -288,6 +340,8 @@ static A8Run dispatch_layout(sycl::queue& q,DeviceProblem p,A8Options o,A8Worksp
         return p.w1?dispatch_mode<G,Layout::native_tq2,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::native_tq2,false>(q,p,o,w,scratch,deps);
     if(p.layout==Layout::ptq1_s2tile8)
         return p.w1?dispatch_mode<G,Layout::ptq1_s2tile8,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::ptq1_s2tile8,false>(q,p,o,w,scratch,deps);
+    if(p.layout==Layout::native_ptq1)
+        return p.w1?dispatch_mode<G,Layout::native_ptq1,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::native_ptq1,false>(q,p,o,w,scratch,deps);
     return p.w1?dispatch_mode<G,Layout::s2tile8,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::s2tile8,false>(q,p,o,w,scratch,deps);
 }
 A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w,float* scratch,const std::vector<sycl::event>& deps) {
@@ -295,9 +349,9 @@ A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w
     if(!p.tokens||p.tokens>2048||!p.topk||p.topk>256||p.topk>p.shape.experts||
        !p.w0||!p.x||!p.ids||!p.y0||!p.status||(p.w1&&!p.y1)||(!p.w1&&p.y1)||!w.invalid)
         throw std::invalid_argument("invalid A8 device view");
-    if(p.layout!=Layout::native_tq2 && p.layout!=Layout::s2tile8 && p.layout!=Layout::ptq1_s2tile8)
-        throw std::invalid_argument("A8 accepts native, s2tile8, or ptq1_s2tile8, NOT legacy A16 tile8");
-    if(p.layout==Layout::ptq1_s2tile8 && o.group==256)
+    if(p.layout!=Layout::native_tq2 && p.layout!=Layout::s2tile8 && p.layout!=Layout::ptq1_s2tile8 && p.layout!=Layout::native_ptq1)
+        throw std::invalid_argument("A8 accepts native TQ2/PTQ1 or repacked s2tile8 layouts");
+    if((p.layout==Layout::ptq1_s2tile8 || p.layout==Layout::native_ptq1) && o.group==256)
         throw std::invalid_argument("PTQ1 K128 scales require A8 group 32 or 128");
     if(p.activation_type!=ActivationType::f16&&p.activation_type!=ActivationType::f32)throw std::invalid_argument("invalid activation type");
     if(o.mode!=A8Mode::staged&&o.mode!=A8Mode::fused&&o.mode!=A8Mode::prequantized)throw std::invalid_argument("invalid A8 mode");
