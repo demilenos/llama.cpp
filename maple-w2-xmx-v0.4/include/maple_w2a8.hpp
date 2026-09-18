@@ -16,6 +16,10 @@ struct A8Options {
     // Optional grouped multi-assignment register reuse. G32/s2tile8/prequantized.
     // Each token still uses the original RepeatCount=1 DPAS arithmetic.
     ExpertTokenTileView token_tiles{};
+    // Dense single-expert PTQ1 token tile. 1 preserves the baseline kernel;
+    // 2/4 keep one native PTQ1 K32 fragment resident while issuing DPAS for
+    // multiple activation rows. This is intentionally separate from MoE tiles.
+    uint32_t ptq1_token_tile=1;
 };
 // Persistent scratch, context-compatible USM. No allocations in enqueue_a8.
 // q/scales are required for staged/prequantized; fused writes them only with capture=true.
