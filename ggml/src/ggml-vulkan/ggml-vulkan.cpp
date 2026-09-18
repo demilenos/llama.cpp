@@ -17372,12 +17372,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         }
 
 #ifdef GGML_VULKAN_PTQ1_XMX
-        if (maple_ptq1_xmx_supported(cgraph->nodes[i])) {
+        if (!vk_perf_logger_enabled && maple_ptq1_xmx_supported(cgraph->nodes[i])) {
             if (ggml_is_empty(cgraph->nodes[i])) {
                 continue;
-            }
-            if (vk_perf_logger_enabled) {
-                return GGML_STATUS_FAILED;
             }
             if (!first_node_in_batch) {
                 vk_context flush_ctx = ggml_vk_get_compute_ctx(ctx);
