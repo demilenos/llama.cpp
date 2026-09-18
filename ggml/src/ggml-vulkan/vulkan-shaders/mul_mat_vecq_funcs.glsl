@@ -158,43 +158,25 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 #endif
 
 #if defined(DATA_A_PTQ1_0)
-// PTQ1_0 stores 128 ternary weights in 24 base-3 bytes plus two tail bytes.
-// The canonical decoder repeatedly multiplies by 3 modulo 256.  For digit plane p,
-// the same digit is ((byte * 3^(p+1)) >> 8) mod 3.  The intermediate is < 256,
-// so x % 3 is evaluated exactly as x - 3*((x*171)>>9), avoiding integer division.
-uint ptq1_digit_fast(const uint b, const uint plane) {
-    const uvec4 pow3 = uvec4(3u, 9u, 27u, 81u);
-    const uint factor = plane < 4u ? pow3[plane] : 243u;
-    const uint x = (b * factor) >> 8u;
-    return x - 3u * ((x * 171u) >> 9u);
-}
-
+// Four consecutive weights share a digit plane, except in the two tail bytes.
 int32_t ptq1_pack4(const uint ib, const uint e0) {
-    uint packed = 0u;
-
-    [[unroll]] for (uint lane = 0u; lane < 4u; ++lane) {
-        const uint e = e0 + lane;
-        uint b;
-        uint plane;
-
-        if (e < 80u) {
-            b = uint(data_a[ib].qs[e & 15u]);
-            plane = e >> 4u;
-        } else if (e < 120u) {
-            const uint t = e - 80u;
-            b = uint(data_a[ib].qs[16u + (t & 7u)]);
-            plane = t >> 3u;
-        } else {
-            const uint t = e - 120u;
-            b = uint(data_a[ib].qh[t & 1u]);
-            plane = t >> 1u;
-        }
-
-        packed |= ptq1_digit_fast(b, plane) << (8u * lane);
+    const uint pow3 = (1u << 28) | (3u << 21) | (9u << 14) | (27u << 7) | 81u;
+    uvec4 bytes;
+    uvec4 powers;
+    if (e0 < 120u) {
+        const uint byte_idx = e0 < 80u ? (e0 & 15u) : 16u + ((e0 - 80u) & 7u);
+        const uint plane = e0 < 80u ? (e0 >> 4u) : ((e0 - 80u) >> 3u);
+        bytes = uvec4(data_a[ib].qs[byte_idx], data_a[ib].qs[byte_idx + 1u],
+                      data_a[ib].qs[byte_idx + 2u], data_a[ib].qs[byte_idx + 3u]);
+        powers = uvec4((pow3 >> (7u * (4u - plane))) & 127u);
+    } else {
+        const uint plane = (e0 - 120u) >> 1u;
+        const uint power = (pow3 >> (7u * (4u - plane))) & 127u;
+        bytes = uvec4(data_a[ib].qh[0], data_a[ib].qh[1], data_a[ib].qh[0], data_a[ib].qh[1]);
+        powers = uvec4(power, power, power * 3u, power * 3u);
     }
-
-    // Convert byte lanes {0,1,2} to signed ternary {-1,0,+1} without
-    // allowing a borrow to cross byte boundaries.
+    const uvec4 digits = (((bytes * powers) & 255u) * 3u) >> 8u;
+    const uint packed = digits.x | (digits.y << 8u) | (digits.z << 16u) | (digits.w << 24u);
     return int32_t(((packed ^ 0x80808080u) - 0x01010101u) ^ 0x80808080u);
 }
 
