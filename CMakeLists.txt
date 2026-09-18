@@ -147,6 +147,7 @@ option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured
 option(LLAMA_DSPARK_MARKOV_BLAS "llama-common: use BLAS for dspark Markov resample" OFF)
 option(LLAMA_DSPARK_MARKOV_CUDA "llama-common: build CUDA dspark Markov resample" ${GGML_CUDA})
 option(LLAMA_DSPARK_MARKOV_METAL "llama-common: build Metal dspark Markov resample" OFF)
+option(LLAMA_PTQ1_XMX "llama: use Maple XMX for Prism PTQ1 Vulkan decode (Windows/Intel Arc)" OFF)
 
 
 # Required for relocatable CMake package
@@ -208,6 +209,17 @@ if (LLAMA_USE_SYSTEM_GGML)
     message(STATUS "Using system-provided libggml, skipping ggml build")
     find_package(ggml REQUIRED)
     add_library(ggml ALIAS ggml::ggml)
+endif()
+
+if (LLAMA_PTQ1_XMX)
+    if (NOT WIN32 OR NOT GGML_VULKAN)
+        message(FATAL_ERROR "LLAMA_PTQ1_XMX requires Windows and GGML_VULKAN")
+    endif()
+    set(MAPLE_BUILD_SYCL ON CACHE BOOL "Build Maple SYCL kernels" FORCE)
+    set(MAPLE_LEVEL4_ZERO_COPY ON CACHE BOOL "Build Windows Vulkan/Level Zero transport" FORCE)
+    set(MAPLE_BUILD_GGML_PTQ1_BRIDGE ON CACHE BOOL "Build Prism PTQ1 bridge" FORCE)
+    set(GGML_VULKAN_PTQ1_XMX ON CACHE BOOL "Enable Vulkan PTQ1 XMX external bridge" FORCE)
+    add_subdirectory(maple-w2-xmx-v0.4)
 endif()
 
 if (NOT TARGET ggml AND NOT LLAMA_USE_SYSTEM_GGML)
