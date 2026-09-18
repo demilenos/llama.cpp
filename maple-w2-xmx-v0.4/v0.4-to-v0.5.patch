@@ -1,0 +1,2155 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f68d6db..a21934e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,16 @@
++# v0.5 — grouped multi-token GEMM
++
++- Baseline is v0.4 expert-grouped RC1, not v0.3 token-major.
++- Add native s2/s8 DPAS RepeatCount 4 and 8 to paired gate/up and down.
++- Add per-call GPU compact tile descriptors; no host tile-count readback.
++- Preserve s2tile8, G32/H32 quantizers, per-token/group scales, gluquant,
++  original slot outputs, route summation order, split1/1 and local4.
++- Tail rows are zero-padded within each expert; no cross-expert tile.
++- Add RC4/8 integer probe, tile planner probe, same-build paired A/B,
++  input frame snapshots, tile histograms and build/source/argv provenance.
++- No Vulkan interop/server integration or GPU performance claim.
++- Authored against attached v0.4 archive, not an unseen local merged-tree diff.
++
+ # v0.4 — one optimization: stable per-expert job grouping
+ 
+ - GPU count/prefix/stable-scatter builds a fresh job permutation every invocation.
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fd45fda..328f710 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,6 +16,9 @@ add_test(NAME maple-moe-reference-tests COMMAND maple-moe-reference-tests)
+ add_executable(maple-grouping-reference-tests tests/grouping_reference_tests.cpp)
+ target_include_directories(maple-grouping-reference-tests PRIVATE include)
+ add_test(NAME maple-grouping-reference-tests COMMAND maple-grouping-reference-tests)
++add_executable(maple-gemm-reference-tests tests/gemm_reference_tests.cpp)
++target_include_directories(maple-gemm-reference-tests PRIVATE include)
++add_test(NAME maple-gemm-reference-tests COMMAND maple-gemm-reference-tests)
+ find_package(Python3 COMPONENTS Interpreter QUIET)
+ if(Python3_FOUND)
+   add_test(NAME python-tests COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p test_*.py)
+@@ -25,7 +28,7 @@ if(MAPLE_BUILD_SYCL)
+   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM|Clang")
+     message(FATAL_ERROR "Use oneAPI DPC++ icx/icpx. Ordinary MSVC/g++ cannot compile these SYCL sources.")
+   endif()
+-  add_library(maple-w2-xmx STATIC src/maple_w2a16.cpp src/maple_w2a8.cpp src/maple_moe.cpp src/expert_grouping.cpp)
++  add_library(maple-w2-xmx STATIC src/maple_w2a16.cpp src/maple_w2a8.cpp src/maple_moe.cpp src/expert_grouping.cpp src/expert_tiles.cpp src/maple_w2a8_gemm.cpp)
+   target_include_directories(maple-w2-xmx PUBLIC include)
+   target_compile_options(maple-w2-xmx PUBLIC -fsycl PRIVATE -O3 -fno-fast-math -fsycl-device-code-split=per_kernel)
+   target_link_options(maple-w2-xmx PUBLIC -fsycl -fsycl-device-code-split=per_kernel)
+@@ -38,6 +41,9 @@ if(MAPLE_BUILD_SYCL)
+   add_executable(maple-grouping-compare tools/grouping_compare.cpp)
+   target_link_libraries(maple-grouping-compare PRIVATE maple-w2-xmx)
+   target_compile_options(maple-grouping-compare PRIVATE -O3 -fno-fast-math)
++  add_executable(maple-gemm-compare tools/gemm_compare.cpp)
++  target_link_libraries(maple-gemm-compare PRIVATE maple-w2-xmx)
++  target_compile_options(maple-gemm-compare PRIVATE -O3 -fno-fast-math)
+   # Preserve v0.1 CLI for old test scripts; both executables share one compiled library.
+   add_executable(maple-w2-bench tools/bench.cpp)
+   target_link_libraries(maple-w2-bench PRIVATE maple-w2-xmx)
+diff --git a/README.ko.md b/README.ko.md
+index 57e9f0a..dc22192 100644
+--- a/README.ko.md
++++ b/README.ko.md
+@@ -1,230 +1,262 @@
+-# Maple W2 XMX optimize v0.4 — per-expert token grouping 한 가지 변경
++# Maple W2 XMX optimize v0.5 — per-expert multi-token GEMM
+ 
+-## 상태
++v0.4의 **expert-major grouped matvec**에 같은 expert의 4개 또는 8개 assignment를
++한 DPAS에 넣는 경로를 추가했다. 기본 비교는 같은 빌드의 **grouped RC1 ↔ GEMM RC4**다.
++RC8도 함께 컴파일하며 `-TokenTile 8`로 선택한다. G32/H32, s2tile8, gluquant,
++async, split1/1, local4는 유지한다. 측정 전 최적 cutoff나 성능 향상을 확정하지 않는다.
+ 
+-이 패키지는 **소스와 Windows 빌드/자동 비교 도구**다. 작성 환경에서 CPU reference,
+-회귀 검사와 sanitizer를 실행했다. **신규 SYCL 컴파일, A750 GPU 실행, 성능 결과는 아직 없다.**
+-GPU PASS나 속도 향상을 미리 주장하지 않는다. 기존 llama DLL, 서버 설정, GGUF를 수정하지 않는다.
++**상태:** CPU 회귀·참조 검사, sanitizer, Python 실행기 검사를 완료했다.
++작성 환경에는 oneAPI compiler, Windows, A750이 없어 신규 SYCL 컴파일,
++GPU 수치·성능 검사, PowerShell 실행은 미검증이다. 검증된 Windows 바이너리가 아닌
++소스 패키지다. 기존 llama-server/DLL/실행 설정은 변경하지 않는다.
+ 
+-제공된 `maple-w2-xmx-v0.3-source.zip`을 기반으로 했다. 사용자의 Q-sweep v2 ZIP에는
+-측정 자료만 있고 Q 확장 소스 diff/바이너리가 없었다. 따라서 v0.3의 Q<=8 guard를 양쪽에
+-동일하게 Q<=2048로 넓혔다. **과거 수치와의 차이보다 같은 v0.4 바이너리의 두 경로를 비교한다.**
+-기존 명령의 상세 변경은 `v0.3-to-v0.4.patch`, 파일 출처는 `SOURCE_PROVENANCE.json`에 있다.
++## 한 번에 빌드하고 비교
+ 
+-## 이번 빌드에서 바꾼 것 / 바꾸지 않은 것
++기존 버전을 덮어쓰지 말고 별도 v0.5 디렉터리에서 실행한다.
+ 
+-기준선은 다음으로 고정한다.
+-
+-```text
+-W2A8 / native signed INT2 x INT8 DPAS
+-s2tile8 / G32 / H32 / gluquant / async
+-Gate split=1 / down split=1 / local=4
+-DPAS RepeatCount=1 / 출력 채널 8개 tile
++```powershell
++.\build_and_test.cmd -Suite full -Device A750 -Model "C:\AI\models\maple-preview-TQ2_0-head-Q4_K.gguf"
+ ```
+ 
+-비교 경로는 정확히 두 가지다.
++같은 layer에서 추출한 capsule을 재사용하려면 `-Model` 대신 `-CapsuleDir`을 지정한다.
++이 디렉터리에 `gate.mw2`, `up.mw2`, `down.mw2`가 있어야 한다.
+ 
+-1. **baseline**: 기존 token-major `(token, selected-expert-slot)` job 순서.
+-2. **expert-grouped**: `(expert ID, original job index)`로 안정 정렬한 실행 순서.
+-
+-이번에는 **multi-token DPAS / grouped GEMM, 출력 tile 확대, split 최적화,
+-H128, queue graph replay, Vulkan interop를 넣지 않았다.** 정렬과 GEMM을 동시에 바꿔
+-원인을 다시 분리하는 상황을 피한다. v0.4가 측정하는 것은 **expert-major job 배치로
+-얻는 지역성의 효과 - 매 호출 grouping 비용**이다. GPU가 workgroup을 반드시 순번대로
+-실행한다고 보장하는 설계는 아니다.
+-
+-A8의 unpack/DPAS/scale 누산 본체와 clipped SwiGLU 함수는 v0.3과 동일하다.
+-`evidence/v03_*_excerpt.txt`와 Python 회귀 검사가 해당 구간을 문자 단위로 비교한다.
+-A16은 라이브러리에 보존했지만 기본 v0.4 성능 스윕에는 넣지 않았다.
++```powershell
++.\build_and_test.cmd -Suite full -Device A750 -CapsuleDir "C:\AI\llama-src\maple-capsules\layer0"
++```
+ 
+-## 데이터 흐름
++RC4가 통과한 뒤 RC8은 재빌드 없이 실행한다.
+ 
+-```text
+-매 호출의 ids [Q,topk]
+-   ↓ GPU group_count
+-   ↓ GPU group_prefix
+-   ↓ GPU group_scatter       ← stable sorted_to_job, 매번 재계산
+-input_quant                  ← 기존 G32
+-   ↓
+-gate/up: grouped index → original job → 기존 DPAS
+-   ↓ 원래 token/selection 위치에 저장
+-SwiGLU + hidden quant        ← 기존 H32, 기존 순서
+-   ↓
+-down: 같은 sorted_to_job 공유 → 기존 DPAS
+-   ↓ 원래 token/selection 위치에 저장
+-weighted_sum                ← 원래 slot 순서대로 합산
++```powershell
++.\build_and_test.cmd -NoBuild -Suite full -TokenTile 8 -Device A750 -CapsuleDir "C:\AI\llama-src\maple-capsules\layer0"
+ ```
+ 
+-**가중치, activation, hidden 전체를 정렬 복사하지 않는다.** 인덱스만 재배열하고
+-원래 주소를 읽고 쓴다. 따라서 추가 gather/scatter 데이터 커널이나 route 재정규화가 없다.
+-여기서 `group_scatter`는 작은 job-index 배열을 쓰는 단계다.
+-
+-Grouping은 순수 SYCL GPU 3개 커널이고 event dependency로 직렬 연결한다.
+-입력 ID의 host readback, 매 enqueue 할당, 이전 토큰의 plan 캐시, 명시적 host wait는 없다.
+-입력 quant와 grouping을 겹치는 별도 스케줄링 최적화도 이번에는 하지 않았다.
++`-NoBuild`는 source/executable hash가 직전 build manifest와 다르면 거절한다.
++원본 GGUF를 변경하거나 재양자화하지 않는다. 선택한 capsule의 shape와 SHA256을 검사한다.
++
++| Suite | Case 수 | 내용 |
++|---|---:|---|
++| smoke | 2 | 작은 Q1 + Q13 out-of-order |
++| quick | 7 | smoke + 실제 형상 Q1/4/64/256/2048 |
++| full | 14 | smoke + Q=1/2/4/8/16/32/64/128/256/512/1024/2048 |
++
++각 case는 두 variants만 비교한다. 본 비교는 28회 AB/BA paired 반복이고 smoke는
++4회다. `-Repeats`로 변경할 수 있다. 합성 weight만 사용할 때는 `-Synthetic`을 명시한다.
++
++## 이번에 달라진 것
++
++| 항목 | 대조군 | 새 경로 |
++|---|---|---|
++| 매 호출 grouping | v0.4 count → prefix → stable scatter | 동일 |
++| DPAS token 축 M / RepeatCount | 1 | 4(기본), 8(선택) |
++| DPAS output 축 N | 8 | 8 |
++| DPAS reduction 축 K | 32 | 32 |
++| 각 K32의 packed W2 타일 | assignment마다 읽음 | 최대 4/8개 assignment가 공유 |
++| Gate/up | paired | paired 유지 |
++| Down | expert별 activation | 같은 expert의 여러 hidden rows |
++| Input/hidden A8 | G32/H32 | 동일, token/group별 scale 유지 |
++| Weight scale | 원래 256-weight block별 | 동일 |
++| 출력 | 원래 token/top-k slot | 동일 |
++| Multi-token descriptor | 없음 | 매 호출 GPU 생성, 시간에 포함 |
++| Split-K | 1/1 | 1/1; 이번 multi-token 경로는 split>1 거절 |
++
++대조군은 v0.3 token-major가 아니다. **이미 grouping한 경로 대비 multi-token tile의
++추가 이득**을 측정한다. 기존 `grouping_compare.cpp`와 token-major/grouped 비교기도
++보존했지만, v0.5의 기본 빌드·실행 대상은 `maple-gemm-compare`다.
++
++## 실제 행렬 커널
++
++`src/maple_w2a8_gemm.cpp`의 핵심:
++
++```cpp
++// A: [R,32] int8 row-major; B: [32,8] packed signed INT2 (64 bytes)
++// C/output: [R,8] int32; R=4 or 8
++ia = xmx::dpas<8, R, int32_t, int32_t, uint32_t, int8_t,
++    xmx::dpas_argument_type::s2,
++    xmx::dpas_argument_type::s8>(ia, packed_b, activation_tile);
++```
+ 
+-Grouping workspace:
++RC1 호출을 단순히 4/8회 반복하는 것이 아니다. **RepeatCount 자체를 4/8로 변경**하고
++하나의 packed B를 R행의 A에 사용한다. Scale 재결합은 G32마다 각 row별로 수행한다.
+ 
+ ```text
+-counts        : int32 [experts+1]
+-offsets       : int32 [experts+2]
+-sorted_to_job : int32 [Q*topk]
++for each weight block (256):
++    load original dw[8]
++    for each activation group (32):
++        load B[32,8] once                 # gate/up은 각각 한 타일
++        gather A[R,32] and da[R]          # 각 row는 서로 다른 token/slot
++        integer_dot[R,8] = DPAS(B,A)
++        for row r:
++            fp32_acc[r] += float(integer_dot[r]) * (dw * da[r])
+ ```
+ 
+-마지막 bucket은 잘못된 expert ID를 위한 것이다. 잘못된 ID를 정상 expert에 섞지 않고,
+-기존 matvec status 검사가 실패하게 한다. Q2048/top8/experts256에서는 추가 workspace가
+-**67,596bytes (약 66.01KiB)**다. 새 weight 사본은 만들지 않는다.
++K 전체를 INT32로 먼저 더한 뒤 scale을 한 번만 적용하지 않는다. Weight scale도
++행 전체에서 같다고 가정하지 않는다. G128/H128로 바꾸지 않았으며 원래 G32를 유지한다.
++Weight는 s2tile8 상태로 읽는다. 모델 전체를 INT8/F16으로 펼쳐 VRAM에 저장하지 않는다.
++Activation/hidden/output의 정렬 복사도 추가하지 않고 gather/scatter로 원래 slot을 다룬다.
+ 
+-구현은 per-expert workgroup의 scan 기반 안정 counting sort다.
+-128개 lane을 사용하며 ID 비교 작업은 대략 O(experts * jobs)다. sorting 자체가 공짜이거나
+-최적인 구현이라고 가정하지 않는다. 세 커널의 비용을 항상 측정한다. scan 사용 시 동일
+-workgroup의 모든 lane이 같은 collective 호출을 수행하도록 했다.
+-참조 API: https://github.khronos.org/SYCL_Reference/iface/group-algorithms-library.html
++## Tile plan과 tail 처리
+ 
+-## 한 번에 빌드하고 Q 스윕
+-
+-별도 `maple-w2-xmx-v0.4` 폴더에 풀고, 그 폴더에서 실행한다.
+-
+-```powershell
+-.\build_and_test.cmd -Suite full -Device A750 -Model "C:\AI\models\maple-preview-TQ2_0-head-Q4_K.gguf"
+-```
+-
+-기존에 추출한 동일 layer의 capsule을 사용하면 재추출하지 않는다.
+-
+-```powershell
+-.\build_and_test.cmd -Suite full -Device A750 -CapsuleDir "C:\AI\llama-src\maple-w2-xmx-v0.3\build\results\YOUR-RUN\moe\weights"
++```text
++ids → 기존 count/prefix/scatter
++    → compact tile descriptor (expert, begin_in_sorted_jobs, row_count)
++    → input_quant
++    → multi-token gate/up
++    → 기존 SwiGLU + hidden quant
++    → multi-token down
++    → 기존 original-slot weighted_sum
+ ```
+ 
+-`CapsuleDir`에는 `gate.mw2 / up.mw2 / down.mw2`가 필요하다. 서로 같은 layer에서 추출한
+-파일이어야 한다. `-Model`과 함께 사용하지 않는다. `-Python`으로 기존 Python venv를
+-지정할 수 있고, 기본 `-Layer`는 0이다. Python 3.10+와 oneAPI/MSVC 환경이 필요하다.
+-`.cmd`의 환경 초기화는 자식 프로세스에 한정한다. 전역 설치나 영구 환경 설정을 바꾸지 않는다.
+-
+-| Suite | 실행 |
+-|---|---|
+-| smoke | Q1 작은 chain + Q13 out-of-order chain, 합성 가중치 |
+-| quick | smoke + 실제 모델 shape Q1/4/64/256/2048 |
+-| full | smoke + Q1/2/4/8/16/32/64/128/256/512/1024/2048 |
+-
+-Full은 **14 cases, 28 variant summary**다. Model shape는 28 repeats, smoke는 최대 4 repeats다.
+-각 case에서 baseline과 grouped만 AB/BA 순서를 번갈아 측정한다. 그룹 크기와 split을
+-추가로 스윕하지 않는다. Q1에서도 자동으로 grouping을 끄지 않으므로 overhead도 드러난다.
+-기존 `-MoeOnly`를 붙여도 되지만 v0.4는 원래 grouping 비교만 수행한다.
++Tile plan은 gate/up과 down에서 재사용한다. 각 expert 구간 안에서만 R행씩 나누므로
++타일이 expert 경계를 넘지 않는다. 남은 1~R-1행은 zero-padding한다. Padding row의
++activation 주소를 읽거나 그 row의 출력을 쓰지 않는다. 최종 top-k 합산 순서는 유지한다.
++Invalid ID는 마지막 invalid bucket으로 분리하고 status 검사에서 거절한다.
+ 
+-다시 측정할 때:
++GPU tile count를 CPU로 읽어온 뒤 launch하면 새로운 동기화가 필요하다. 이를 피하기 위해
++host가 안전한 상한으로 launch하고, GPU가 실제 tile count 이후의 작업을 즉시 반환한다.
++E=expert 수, J=Q*topk일 때 invalid bucket 하나까지 포함한 상한은 다음과 같다.
+ 
+-```powershell
+-.\build_and_test.cmd -NoBuild -Suite full -Device A750 -CapsuleDir "C:\path\to\weights"
++```text
++capacity = min(J, ceil(J/R) + E)
++actual_tiles = sum_e ceil(count[e]/R)
+ ```
+ 
+-`-NoBuild`는 source와 exe hash를 확인한다. 소스가 변경됐거나 다른 바이너리면 재빌드를 요구한다.
+-이전 v0.3의 많은 variant를 다시 돌리고 싶을 때만 `build_and_test_v0.3.cmd`를 사용한다.
++빈 expert의 계산 타일은 만들지 않는다. Q2048/top8/E256/R4에서 capacity=4352이며,
++추가 descriptor workspace는 `(3*capacity + E + 2)*4` = **53,256 bytes**다.
++기존 grouping workspace 67,596 bytes와는 별도이며, 새로운 weight 사본은 없다.
++R8의 추가 descriptor workspace는 28,680 bytes다.
+ 
+-## 측정 범위와 결과 파일
++Expert당 토큰 수가 작으면 padding과 planner 비용 때문에 손해일 수 있다.
++이번에는 작은 Q를 RC1로 자동 우회하지 않고 그 손해까지 측정한다.
++Persistent queue, split-K 재튜닝, output-channel tile 확대, 추가 fusion은 넣지 않았다.
++
++## 결과와 판정
+ 
+ ```text
+-build/results/<timestamp>-v04-grouping-full/
++build/results/<stamp>-v05-gemm-rc4-full/
+   run.log
+-  grouping/
++  gemm/
++    q_speedup.csv
++    all_gemm_summary.csv
++    suite_status.json
++    plan.json
+     probe.log
+-    grouping-build 정보는 suite_status.json의 build 항목
+-    all_grouping_summary.csv
+-    q_speedup.csv             ← 먼저 볼 파일
+-    suite_status.json         ← 소스·바이너리·가중치 hash, 실패 보존
+-    q0001 ... q2048/
+-      summary.csv
+-      samples.csv
+-      stages.csv
+-      routing_histogram.csv
+-      mapping_validation.csv
+-      pair_correctness.csv
+-      numerical.csv
+-      manifest.txt
++    provenance/
++    q0001/ ... q2048/
++      manifest.txt / summary.csv / samples.csv / stages.csv
++      routing_histogram.csv / tile_histogram.csv
++      tile_validation.csv / mapping_validation.csv
++      pair_correctness.csv / numerical.csv
++      x.f32 / routes.f32 / ids_frames.i32
+ ```
+ 
+-| 지표 | 정의 |
++| 지표 | 의미 |
+ |---|---|
+-| `wall_median_us`, `wall_p95_us` | enqueue 시작부터 최종 MoE completion까지. grouping 포함 |
+-| `group_kernel_median_us` | count+prefix+scatter의 GPU 실행시간 합. inter-kernel gap은 별도 |
+-| `core_gpu_span_median_us` | input quant 시작부터 expert 합산 완료까지 |
+-| `gate_up_median_us`, `down_median_us` | 가중치 행렬 연산 구간 |
+-| `gpu_span_median_us` | grouped이면 count부터, baseline이면 input_quant부터 최종 출력까지 |
+-| `gpu_gap_median_us` | 같은 반복의 GPU span - kernel sum |
+-| `speedup_vs_ungrouped_same_build` | 같은 바이너리 baseline wall 중앙값 / 해당 경로 wall 중앙값 |
+-| `paired_saved_median_us` | 같은 ID frame을 처리한 반복별 baseline-grouped 시간차의 중앙값 |
+-| `grouped_wins` | paired repeat에서 grouped가 빠른 횟수 |
+-
+-**grouping을 미리 해 놓고 dot만 재는 경로는 없다.** 매 호출 새로 plan을 만든다.
+-Warmup/first는 repeat 통계에서 제외한다. first도 CPU/GPU 수치 검사 뒤라 cold JIT가 아니다.
+-같은 round에는 같은 입력과 같은 ID frame을 사용한다. 다음 round의 expert ID는 보통 달라진다.
+-고정 ID 파일을 줘도 grouping을 생략하지 않는다.
+-
+-weight upload/repack, workspace allocation, 기준값 계산, 검사용 readback은 steady-state 시간 밖이다.
+-FA, norm, router 계산, residual, sampler, Vulkan handoff도 없다. **전체 모델 TG가 아니다.**
+-`-ScrubMiB` 기본값은 이전 테스트와 같은 0이다. 한 layer 반복에 따른 cache 영향을 없앤 결과라고
+-주장하지 않는다. 실제 weight를 지정해도 activation·IDs·routing weight는 기본 합성이다.
+-
+-각 지표의 중앙값은 독립적으로 집계한다. median(kernel)+median(gap)이 median(span)과
+-정확히 같을 필요는 없다. 원인 분석은 samples/stages의 같은 반복 단위로 한다.
+-순이익을 판정할 때는 `core_gpu_span`의 개선만 보지 말고 **wall time**을 사용한다.
++| `grouped_rc1_us` / `gemm_us` | Grouping까지 포함한 MoE 전체 wall |
++| `speedup` | grouped_rc1_us / gemm_us. 1보다 크면 개선 |
++| `tile_plan_us` | GEMM에만 추가한 descriptor 생성 GPU 시간 |
++| `group_kernel_us` | 기존 count/prefix/scatter 합계. Tile plan 제외 |
++| `gate_speedup` / `down_speedup` | Projection별 비교. 단독 채택 지표는 아님 |
++| `paired_saved_median_us` / `gemm_wins` | 같은 ID frame을 쓴 반복별 순절약·승리 횟수 |
++| `grouped_rc1_p95_us` / `gemm_p95_us` | 지연 상위값 비교 |
++
++`tile_histogram.csv`는 실행에 사용한 IDs로부터 tile/tail/padding 수를 계산한다.
++`valid_row_fraction = jobs/(actual_tiles*R)`는 유효 행 비율이다.
++높은 유효 행 비율은 4/8배 wall speedup을 보장하지 않는다. 커널 시간은 줄었는데
++planner까지 포함한 전체 시간이 증가했다면 이번 경로는 손해로 판정한다.
++
++### 시간 경계
++
++CPU enqueue 시작부터 체인 completion 대기 종료까지 측정한다.
++Weight repack/upload, 입력 생성/upload, CPU reference, 증거 readback은 측정 밖이다.
++Grouping, tile plan, 매 호출 A8 양자화, GLU/down/sum은 측정 안이다.
++중간 host wait 없이 마지막 completion만 기다린다.
++GPU gap을 전부 CPU overhead라고 부르거나 GPU 실행과 host wait를 중복 합산하지 않는다.
++
++Percentile 정의는 v0.4와 같은 `sorted[floor(p*(n-1))]`다. 28회에서 `wall_median_us`는
++두 중앙 표본 중 낮은 쪽이며 통상적인 두 값 평균 median과 다르다.
++Python paired 지표는 `statistics.median`을 사용한다. First는 수치 검사 후 실행이므로
++cold-JIT 시간으로 해석하지 않는다.
+ 
+ ## 정확성 검사
+ 
+-GPU 실행 시:
++기존 RC1 probe와 별도로 **RC4/RC8 독립 integer probe**를 실행한다. 각 37개 case에서
++s2=-2를 포함한 sign extension, s8=-128, 서로 다른 row/column, one-hot K,
++비영점 C accumulator를 검사한다. RC4/RC8 합계 **3,552개 정수 출력**을 비교한다.
++실패하면 RC1로 조용히 fallback하지 않고 중단한다.
++Functional PASS는 최종 ISA disassembly를 확인했다는 뜻이 아니다.
++
++Tile-plan GPU probe는 out-of-order queue에서 명시적 dependency를 사용하며,
++빈 expert/invalid ID/tail, canary, 같은 workspace에서 ID를 바꾸는 경우를 검사한다.
++본 비교는 모든 token의 mapping, gate/up/hidden/down/output, A8 q/scale을 GPU A/B한다.
++q와 scale의 bitwise 일치를 요구하며 기존 v0.4 출력 허용차를 완화하지 않았다.
++출력 버퍼를 NaN으로 채워 누락된 쓰기가 이전 결과로 통과하지 못하게 한다.
+ 
+-1. 기존 signed INT2/INT8 DPAS probe.
+-2. 신규 grouping probe: invalid ID, 빈 expert, 모두 같은 expert, 128 경계 tail, 16384 jobs,
+-   같은 workspace에서 변경된 IDs, out-of-order dependency, 뒤쪽 canary.
+-3. 본 비교의 두 ID snapshot에서 **전체 counts/offsets/permutation**을 CPU reference와 비교.
+-4. 전체 Q의 gate/up/hidden/down/y를 baseline-grouped 간 비교. 출력은 검사 전 NaN으로 poison.
+-5. Input/hidden A8 code와 scale 배열은 baseline/grouped가 **bitwise 같아야** 통과.
+-6. CPU 산술 기준은 snapshot별 **최대 3개 token의 모든 selected expert/output**을 검사.
+-   큰 Q에서도 검증 시간이 폭증하지 않게 표본 CPU 검사와 전체 GPU A/B 검사를 구분했다.
+-7. 마지막 timed call의 grouping도 CPU reference와 비교하여 untimed plan 재사용을 배제.
++CPU gold는 snapshot당 최대 3개 token의 전체 top-k/output에 적용한다.
++큰 Q의 모든 출력을 CPU gold로 검사했다는 뜻은 아니다. 전체 GPU A/B는 모든 출력을 검사한다.
++`kernel_pass`와 chain NMSE는 구현·국소 오차 자료이지 전체 모델 품질 인증이 아니다.
+ 
+-출력의 full GPU A/B 허용치는 NMSE<=1e-10, max_abs/reference_RMS<=1e-4이며,
+-bitwise 일치 여부도 별도 기록한다. CPU stage 허용치는 기존 NMSE<=1e-6,
+-max_abs/reference_RMS<=0.005다. 실패하면 timing/집계를 중단하고 로그를 보존한다.
++## 재현성과 실제 입력
+ 
+-`chain_sample_nmse_vs_f32`는 최대 3개 token 표본의 기존 F32 체인 대비 보고값이다.
+-**전체 Q의 CPU gold 결과나 전체 모델 품질 인증으로 취급하지 않는다.**
+-그룹화 자체는 모델 연산·양자화 규칙을 바꾸지 않는다.
++Source/executable/object hash, compiler flags/version log, exact argv,
++capsule hash, git HEAD/status/diff(가능할 때), 관련 runtime 환경변수를 결과에 보존한다.
++Git 관리 밖이면 그 상태를 기록하며 부모 repo의 HEAD만으로 lab 소스를 식별하지 않는다.
++생성한 x/routes/전체 round IDs도 raw binary로 저장하고 실행기가 hash를 기록한다.
++Compiler별 표준 난수 라이브러리 차이에 의존하지 않고 같은 입력을 재생할 수 있다.
+ 
+-## 실제 activation/ID로 한 번 비교
++재생 예시(저장 시점과 같은 Q/repeats/warmup/topk 필요):
+ 
+ ```powershell
+-.\build\maple-grouping-compare.exe --device A750 --gate .\gate.mw2 --up .\up.mw2 --down .\down.mw2 --tokens 64 --topk 8 --x-file .\x.f32 --ids-file .\ids.i32 --routes-file .\routes.f32 --gate-split 1 --down-split 1 --local 4 --out .\build\results\captured-q64
++.\build\maple-gemm-compare.exe --device A750 `
++  --gate .\weights\gate.mw2 --up .\weights\up.mw2 --down .\weights\down.mw2 `
++  --tokens 2048 --topk 8 --token-tile 4 --repeats 28 --warmup 3 `
++  --x-file .\prior\x.f32 --routes-file .\prior\routes.f32 `
++  --ids-frames-file .\prior\ids_frames.i32 --out .\build\replay-new
+ ```
+ 
+-Little-endian raw: x=[Q,K] F32, ids=[Q,topk] I32, routes=[Q,topk] F32.
+-입력과 모든 capsule은 같은 layer에서 캡처해야 한다. Routes는 이미 정규화되어 있어야 한다.
+-이 명령도 두 경로를 자동 비교한다. 새로운 Q마다 따로 코드를 수정할 필요는 없다.
++`x.f32=[Q,K]`, `routes.f32=[Q,topk]`, `ids_frames.i32=[1+warmup+repeats,Q,topk]`다.
++실제 decoder에서 얻은 ID 1frame을 반복할 때는 `--ids-file`을 사용한다.
++두 ID 입력 옵션을 동시에 지정할 수 없다. Raw 파일은 little-endian이다.
++Routes는 finite/nonnegative/token별 합1을 검사하며 임의로 재정규화하지 않는다.
+ 
+-## API / 수명 계약
++`-Model`/`-CapsuleDir`을 지정해도 입력을 별도 제공하지 않으면 activation/routes/IDs는 합성이다.
++단일 layer의 국소 비교이며 FA/router/norm/residual/sampling, Vulkan handoff, full-model
++품질을 측정하지 않는다. Q는 입력 토큰 수이며 40K/128K 같은 KV 길이가 아니다.
+ 
+-`MoeOptions::expert_grouping=true`, `MoeWorkspace::grouping`을 설정한다.
+-모든 USM 포인터는 같은 context에서 접근 가능해야 한다. 동일 workspace를 동시에
+-in-flight인 두 호출에 쓰지 않는다. Producer dependencies를 정확히 넘긴다.
+-예외 후 queue를 drain하기 전에 버퍼를 해제하거나 같은 출력에 fallback을 쓰면 안 된다.
++## 코드와 통합 경계
+ 
+-Grouping은 현재 **s2tile8/G32/H32/gluquant**에만 열려 있다. 다른 조합에 조용히 적용하지 않고
+-명시적으로 거절한다. 기존 baseline은 `expert_grouping=false`로 그대로 사용할 수 있다.
++- `src/maple_w2a8_gemm.cpp`: RC4/8 paired gate/up·down과 integer probe.
++- `src/expert_tiles.cpp`: GPU compact descriptor planner.
++- `include/expert_tiles_reference.hpp`: 용량 상한·CPU tile reference.
++- `MoeOptions.token_tile`: 1=기존 경로, 4/8=새 경로. 기존 호출을 보호하기 위해 기본값은 1.
++- `MoeWorkspace.tiles`: caller 소유의 persistent USM. 동시 in-flight 호출이 공유하면 안 됨.
++- `enqueue_moe()`: grouping/plan/quant/dot/GLU/down/sum의 event dependency 연결.
++- `tools/gemm_compare.cpp`, `tools/run_gemm_suite.py`: 자동 paired A/B.
+ 
+-## Linux / CMake
++Native layout, G128/G256, split>1을 multi-token에 요청하면 명시적으로 거절한다.
++기존 RC1 경로의 지원 범위는 유지한다. Vulkan allocation import와 llama scheduler 자동
++subgraph 교체는 미구현이다. Raw Vulkan address를 USM으로 넘기면 안 된다.
++제출 중 예외가 발생하면 queue를 drain한 뒤 workspace를 해제·재사용해야 한다.
+ 
+-CPU 검사만:
++Linux CPU 검사:
+ 
+-```bash
++```sh
+ cmake -S . -B build-cpu -DMAPLE_BUILD_SYCL=OFF -DCMAKE_BUILD_TYPE=Release
+ cmake --build build-cpu -j
+ ctest --test-dir build-cpu --output-on-failure
+ ```
+ 
+-oneAPI가 있는 환경의 SYCL 빌드 (여기서는 미실행):
++Linux oneAPI는 `-DMAPLE_BUILD_SYCL=ON -DCMAKE_CXX_COMPILER=icpx`로 빌드한다.
++실제로 재빌드한 뒤 `python tools/stamp_gemm_build.py --exe build/maple-gemm-compare`를 실행한다.
++오래된 실행 파일을 새 source hash로 정당화하는 용도로 수동 stamp를 사용하면 안 된다.
+ 
+-```bash
+-cmake -S . -B build -DMAPLE_BUILD_SYCL=ON -DCMAKE_CXX_COMPILER=icpx -DCMAKE_BUILD_TYPE=Release
+-cmake --build build --target maple-grouping-compare -j
+-python tools/stamp_grouping_build.py --exe build/maple-grouping-compare
+-python tools/run_grouping_suite.py --exe build/maple-grouping-compare --out build/results/grouping-full --suite full --capsule-dir /path/to/capsules
+-```
++## 출처
++
++DPAS shape/RepeatCount/operand packing은 Intel의 다음 1차 자료를 확인했다.
++- https://github.com/intel/intel-graphics-compiler/blob/master/documentation/visa/instructions/DPAS.md
++- https://github.com/intel/llvm/blob/sycl/sycl/include/sycl/ext/intel/esimd/xmx/dpas.hpp
++
++기준: 첨부 `maple-w2-xmx-v0.4-source.zip`
++SHA256 `606d2937ff6cf267050112650913561a74532a7e990f55736eea06a2341eb008`.
++현재 사용자 local merged-tree와 완전히 같다고 단정하지 않는다.
++`v0.4-to-v0.5.patch`는 이 첨부 소스에 대한 차분이다.
+diff --git a/README.v0.4.ko.md b/README.v0.4.ko.md
+new file mode 100644
+index 0000000..57e9f0a
+--- /dev/null
++++ b/README.v0.4.ko.md
+@@ -0,0 +1,230 @@
++# Maple W2 XMX optimize v0.4 — per-expert token grouping 한 가지 변경
++
++## 상태
++
++이 패키지는 **소스와 Windows 빌드/자동 비교 도구**다. 작성 환경에서 CPU reference,
++회귀 검사와 sanitizer를 실행했다. **신규 SYCL 컴파일, A750 GPU 실행, 성능 결과는 아직 없다.**
++GPU PASS나 속도 향상을 미리 주장하지 않는다. 기존 llama DLL, 서버 설정, GGUF를 수정하지 않는다.
++
++제공된 `maple-w2-xmx-v0.3-source.zip`을 기반으로 했다. 사용자의 Q-sweep v2 ZIP에는
++측정 자료만 있고 Q 확장 소스 diff/바이너리가 없었다. 따라서 v0.3의 Q<=8 guard를 양쪽에
++동일하게 Q<=2048로 넓혔다. **과거 수치와의 차이보다 같은 v0.4 바이너리의 두 경로를 비교한다.**
++기존 명령의 상세 변경은 `v0.3-to-v0.4.patch`, 파일 출처는 `SOURCE_PROVENANCE.json`에 있다.
++
++## 이번 빌드에서 바꾼 것 / 바꾸지 않은 것
++
++기준선은 다음으로 고정한다.
++
++```text
++W2A8 / native signed INT2 x INT8 DPAS
++s2tile8 / G32 / H32 / gluquant / async
++Gate split=1 / down split=1 / local=4
++DPAS RepeatCount=1 / 출력 채널 8개 tile
++```
++
++비교 경로는 정확히 두 가지다.
++
++1. **baseline**: 기존 token-major `(token, selected-expert-slot)` job 순서.
++2. **expert-grouped**: `(expert ID, original job index)`로 안정 정렬한 실행 순서.
++
++이번에는 **multi-token DPAS / grouped GEMM, 출력 tile 확대, split 최적화,
++H128, queue graph replay, Vulkan interop를 넣지 않았다.** 정렬과 GEMM을 동시에 바꿔
++원인을 다시 분리하는 상황을 피한다. v0.4가 측정하는 것은 **expert-major job 배치로
++얻는 지역성의 효과 - 매 호출 grouping 비용**이다. GPU가 workgroup을 반드시 순번대로
++실행한다고 보장하는 설계는 아니다.
++
++A8의 unpack/DPAS/scale 누산 본체와 clipped SwiGLU 함수는 v0.3과 동일하다.
++`evidence/v03_*_excerpt.txt`와 Python 회귀 검사가 해당 구간을 문자 단위로 비교한다.
++A16은 라이브러리에 보존했지만 기본 v0.4 성능 스윕에는 넣지 않았다.
++
++## 데이터 흐름
++
++```text
++매 호출의 ids [Q,topk]
++   ↓ GPU group_count
++   ↓ GPU group_prefix
++   ↓ GPU group_scatter       ← stable sorted_to_job, 매번 재계산
++input_quant                  ← 기존 G32
++   ↓
++gate/up: grouped index → original job → 기존 DPAS
++   ↓ 원래 token/selection 위치에 저장
++SwiGLU + hidden quant        ← 기존 H32, 기존 순서
++   ↓
++down: 같은 sorted_to_job 공유 → 기존 DPAS
++   ↓ 원래 token/selection 위치에 저장
++weighted_sum                ← 원래 slot 순서대로 합산
++```
++
++**가중치, activation, hidden 전체를 정렬 복사하지 않는다.** 인덱스만 재배열하고
++원래 주소를 읽고 쓴다. 따라서 추가 gather/scatter 데이터 커널이나 route 재정규화가 없다.
++여기서 `group_scatter`는 작은 job-index 배열을 쓰는 단계다.
++
++Grouping은 순수 SYCL GPU 3개 커널이고 event dependency로 직렬 연결한다.
++입력 ID의 host readback, 매 enqueue 할당, 이전 토큰의 plan 캐시, 명시적 host wait는 없다.
++입력 quant와 grouping을 겹치는 별도 스케줄링 최적화도 이번에는 하지 않았다.
++
++Grouping workspace:
++
++```text
++counts        : int32 [experts+1]
++offsets       : int32 [experts+2]
++sorted_to_job : int32 [Q*topk]
++```
++
++마지막 bucket은 잘못된 expert ID를 위한 것이다. 잘못된 ID를 정상 expert에 섞지 않고,
++기존 matvec status 검사가 실패하게 한다. Q2048/top8/experts256에서는 추가 workspace가
++**67,596bytes (약 66.01KiB)**다. 새 weight 사본은 만들지 않는다.
++
++구현은 per-expert workgroup의 scan 기반 안정 counting sort다.
++128개 lane을 사용하며 ID 비교 작업은 대략 O(experts * jobs)다. sorting 자체가 공짜이거나
++최적인 구현이라고 가정하지 않는다. 세 커널의 비용을 항상 측정한다. scan 사용 시 동일
++workgroup의 모든 lane이 같은 collective 호출을 수행하도록 했다.
++참조 API: https://github.khronos.org/SYCL_Reference/iface/group-algorithms-library.html
++
++## 한 번에 빌드하고 Q 스윕
++
++별도 `maple-w2-xmx-v0.4` 폴더에 풀고, 그 폴더에서 실행한다.
++
++```powershell
++.\build_and_test.cmd -Suite full -Device A750 -Model "C:\AI\models\maple-preview-TQ2_0-head-Q4_K.gguf"
++```
++
++기존에 추출한 동일 layer의 capsule을 사용하면 재추출하지 않는다.
++
++```powershell
++.\build_and_test.cmd -Suite full -Device A750 -CapsuleDir "C:\AI\llama-src\maple-w2-xmx-v0.3\build\results\YOUR-RUN\moe\weights"
++```
++
++`CapsuleDir`에는 `gate.mw2 / up.mw2 / down.mw2`가 필요하다. 서로 같은 layer에서 추출한
++파일이어야 한다. `-Model`과 함께 사용하지 않는다. `-Python`으로 기존 Python venv를
++지정할 수 있고, 기본 `-Layer`는 0이다. Python 3.10+와 oneAPI/MSVC 환경이 필요하다.
++`.cmd`의 환경 초기화는 자식 프로세스에 한정한다. 전역 설치나 영구 환경 설정을 바꾸지 않는다.
++
++| Suite | 실행 |
++|---|---|
++| smoke | Q1 작은 chain + Q13 out-of-order chain, 합성 가중치 |
++| quick | smoke + 실제 모델 shape Q1/4/64/256/2048 |
++| full | smoke + Q1/2/4/8/16/32/64/128/256/512/1024/2048 |
++
++Full은 **14 cases, 28 variant summary**다. Model shape는 28 repeats, smoke는 최대 4 repeats다.
++각 case에서 baseline과 grouped만 AB/BA 순서를 번갈아 측정한다. 그룹 크기와 split을
++추가로 스윕하지 않는다. Q1에서도 자동으로 grouping을 끄지 않으므로 overhead도 드러난다.
++기존 `-MoeOnly`를 붙여도 되지만 v0.4는 원래 grouping 비교만 수행한다.
++
++다시 측정할 때:
++
++```powershell
++.\build_and_test.cmd -NoBuild -Suite full -Device A750 -CapsuleDir "C:\path\to\weights"
++```
++
++`-NoBuild`는 source와 exe hash를 확인한다. 소스가 변경됐거나 다른 바이너리면 재빌드를 요구한다.
++이전 v0.3의 많은 variant를 다시 돌리고 싶을 때만 `build_and_test_v0.3.cmd`를 사용한다.
++
++## 측정 범위와 결과 파일
++
++```text
++build/results/<timestamp>-v04-grouping-full/
++  run.log
++  grouping/
++    probe.log
++    grouping-build 정보는 suite_status.json의 build 항목
++    all_grouping_summary.csv
++    q_speedup.csv             ← 먼저 볼 파일
++    suite_status.json         ← 소스·바이너리·가중치 hash, 실패 보존
++    q0001 ... q2048/
++      summary.csv
++      samples.csv
++      stages.csv
++      routing_histogram.csv
++      mapping_validation.csv
++      pair_correctness.csv
++      numerical.csv
++      manifest.txt
++```
++
++| 지표 | 정의 |
++|---|---|
++| `wall_median_us`, `wall_p95_us` | enqueue 시작부터 최종 MoE completion까지. grouping 포함 |
++| `group_kernel_median_us` | count+prefix+scatter의 GPU 실행시간 합. inter-kernel gap은 별도 |
++| `core_gpu_span_median_us` | input quant 시작부터 expert 합산 완료까지 |
++| `gate_up_median_us`, `down_median_us` | 가중치 행렬 연산 구간 |
++| `gpu_span_median_us` | grouped이면 count부터, baseline이면 input_quant부터 최종 출력까지 |
++| `gpu_gap_median_us` | 같은 반복의 GPU span - kernel sum |
++| `speedup_vs_ungrouped_same_build` | 같은 바이너리 baseline wall 중앙값 / 해당 경로 wall 중앙값 |
++| `paired_saved_median_us` | 같은 ID frame을 처리한 반복별 baseline-grouped 시간차의 중앙값 |
++| `grouped_wins` | paired repeat에서 grouped가 빠른 횟수 |
++
++**grouping을 미리 해 놓고 dot만 재는 경로는 없다.** 매 호출 새로 plan을 만든다.
++Warmup/first는 repeat 통계에서 제외한다. first도 CPU/GPU 수치 검사 뒤라 cold JIT가 아니다.
++같은 round에는 같은 입력과 같은 ID frame을 사용한다. 다음 round의 expert ID는 보통 달라진다.
++고정 ID 파일을 줘도 grouping을 생략하지 않는다.
++
++weight upload/repack, workspace allocation, 기준값 계산, 검사용 readback은 steady-state 시간 밖이다.
++FA, norm, router 계산, residual, sampler, Vulkan handoff도 없다. **전체 모델 TG가 아니다.**
++`-ScrubMiB` 기본값은 이전 테스트와 같은 0이다. 한 layer 반복에 따른 cache 영향을 없앤 결과라고
++주장하지 않는다. 실제 weight를 지정해도 activation·IDs·routing weight는 기본 합성이다.
++
++각 지표의 중앙값은 독립적으로 집계한다. median(kernel)+median(gap)이 median(span)과
++정확히 같을 필요는 없다. 원인 분석은 samples/stages의 같은 반복 단위로 한다.
++순이익을 판정할 때는 `core_gpu_span`의 개선만 보지 말고 **wall time**을 사용한다.
++
++## 정확성 검사
++
++GPU 실행 시:
++
++1. 기존 signed INT2/INT8 DPAS probe.
++2. 신규 grouping probe: invalid ID, 빈 expert, 모두 같은 expert, 128 경계 tail, 16384 jobs,
++   같은 workspace에서 변경된 IDs, out-of-order dependency, 뒤쪽 canary.
++3. 본 비교의 두 ID snapshot에서 **전체 counts/offsets/permutation**을 CPU reference와 비교.
++4. 전체 Q의 gate/up/hidden/down/y를 baseline-grouped 간 비교. 출력은 검사 전 NaN으로 poison.
++5. Input/hidden A8 code와 scale 배열은 baseline/grouped가 **bitwise 같아야** 통과.
++6. CPU 산술 기준은 snapshot별 **최대 3개 token의 모든 selected expert/output**을 검사.
++   큰 Q에서도 검증 시간이 폭증하지 않게 표본 CPU 검사와 전체 GPU A/B 검사를 구분했다.
++7. 마지막 timed call의 grouping도 CPU reference와 비교하여 untimed plan 재사용을 배제.
++
++출력의 full GPU A/B 허용치는 NMSE<=1e-10, max_abs/reference_RMS<=1e-4이며,
++bitwise 일치 여부도 별도 기록한다. CPU stage 허용치는 기존 NMSE<=1e-6,
++max_abs/reference_RMS<=0.005다. 실패하면 timing/집계를 중단하고 로그를 보존한다.
++
++`chain_sample_nmse_vs_f32`는 최대 3개 token 표본의 기존 F32 체인 대비 보고값이다.
++**전체 Q의 CPU gold 결과나 전체 모델 품질 인증으로 취급하지 않는다.**
++그룹화 자체는 모델 연산·양자화 규칙을 바꾸지 않는다.
++
++## 실제 activation/ID로 한 번 비교
++
++```powershell
++.\build\maple-grouping-compare.exe --device A750 --gate .\gate.mw2 --up .\up.mw2 --down .\down.mw2 --tokens 64 --topk 8 --x-file .\x.f32 --ids-file .\ids.i32 --routes-file .\routes.f32 --gate-split 1 --down-split 1 --local 4 --out .\build\results\captured-q64
++```
++
++Little-endian raw: x=[Q,K] F32, ids=[Q,topk] I32, routes=[Q,topk] F32.
++입력과 모든 capsule은 같은 layer에서 캡처해야 한다. Routes는 이미 정규화되어 있어야 한다.
++이 명령도 두 경로를 자동 비교한다. 새로운 Q마다 따로 코드를 수정할 필요는 없다.
++
++## API / 수명 계약
++
++`MoeOptions::expert_grouping=true`, `MoeWorkspace::grouping`을 설정한다.
++모든 USM 포인터는 같은 context에서 접근 가능해야 한다. 동일 workspace를 동시에
++in-flight인 두 호출에 쓰지 않는다. Producer dependencies를 정확히 넘긴다.
++예외 후 queue를 drain하기 전에 버퍼를 해제하거나 같은 출력에 fallback을 쓰면 안 된다.
++
++Grouping은 현재 **s2tile8/G32/H32/gluquant**에만 열려 있다. 다른 조합에 조용히 적용하지 않고
++명시적으로 거절한다. 기존 baseline은 `expert_grouping=false`로 그대로 사용할 수 있다.
++
++## Linux / CMake
++
++CPU 검사만:
++
++```bash
++cmake -S . -B build-cpu -DMAPLE_BUILD_SYCL=OFF -DCMAKE_BUILD_TYPE=Release
++cmake --build build-cpu -j
++ctest --test-dir build-cpu --output-on-failure
++```
++
++oneAPI가 있는 환경의 SYCL 빌드 (여기서는 미실행):
++
++```bash
++cmake -S . -B build -DMAPLE_BUILD_SYCL=ON -DCMAKE_CXX_COMPILER=icpx -DCMAKE_BUILD_TYPE=Release
++cmake --build build --target maple-grouping-compare -j
++python tools/stamp_grouping_build.py --exe build/maple-grouping-compare
++python tools/run_grouping_suite.py --exe build/maple-grouping-compare --out build/results/grouping-full --suite full --capsule-dir /path/to/capsules
++```
+diff --git a/SOURCE_PROVENANCE.json b/SOURCE_PROVENANCE.json
+index 5208727..0387c79 100644
+--- a/SOURCE_PROVENANCE.json
++++ b/SOURCE_PROVENANCE.json
+@@ -1,48 +1,23 @@
+ {
+-  "version": "0.4",
+-  "primary_base": {
+-    "file": "maple-w2-xmx-v0.3-source.zip",
+-    "sha256": "80c4ea3a5983bc983fc16ea9490b8ee8c45c7558cb5a0658853dfd1fddc5cf05"
+-  },
+-  "measurement_context": {
+-    "file": "maple-baseline-w2a8-g32-h32-gluquant-async-q-sweep-20260918-v2.zip",
+-    "sha256": "0dca4410ba65480708bfae2dd8802aa1d610dc4caa3b5c48f3c2219ca60051aa",
+-    "contains_local_source_diff": false
+-  },
+-  "one_optimization": "GPU stable expert-major job permutation used by unchanged repeat-1 A8 gate/up and down",
+-  "control": "G32/H32 gluquant async s2tile8 split1/1 local4; Q guard extended equally to 2048",
+-  "unchanged_arithmetic": [
+-    {
+-      "path": "src/maple_w2a8.cpp",
+-      "base_sha256": "d5f80ff864b8dcb0b63c7bffc6fbdb825d4d07ed0b15c8b4905704117ee3c5c9"
+-    },
+-    {
+-      "path": "src/maple_moe.cpp",
+-      "base_sha256": "7dabe35b5534fa12a858bee9001f71183ccb7c36da14cec6cf962cb2162a219e"
+-    },
+-    {
+-      "path": "include/tq2_reference.hpp",
+-      "base_sha256": "10da29588c589a0da52179a5d9f273b40aca4da920615956e607947c0aa9c77b"
+-    },
+-    {
+-      "path": "include/w2a8_reference.hpp",
+-      "base_sha256": "05e0e065a6c8cb9e73bf6f5e6546317e7ae185df057527f823117d5c382c3479"
+-    },
+-    {
+-      "path": "include/moe_reference.hpp",
+-      "base_sha256": "118f3ce8e1a4321b4770fe6f31f1a341ed62d02feae99f609130ddde0e232c0a"
+-    }
++  "version": "0.5",
++  "base_archive": "maple-w2-xmx-v0.4-source.zip",
++  "base_archive_sha256": "606d2937ff6cf267050112650913561a74532a7e990f55736eea06a2341eb008",
++  "base_matches_current_user_local_tree": "not established",
++  "experiment": "grouped RC1 vs per-expert multi-token DPAS RC4 or RC8",
++  "fixed": "G32/H32 s2tile8 gluquant async split1/1 local4",
++  "primary_sources": [
++    "https://github.com/intel/intel-graphics-compiler/blob/master/documentation/visa/instructions/DPAS.md",
++    "https://github.com/intel/llvm/blob/sycl/sycl/include/sycl/ext/intel/esimd/xmx/dpas.hpp"
+   ],
+-  "not_implemented": [
+-    "multi-token DPAS/GEMM",
+-    "grouping/input-quant overlap",
+-    "new split/precision/queue policy",
+-    "Vulkan import/semaphores",
+-    "llama dispatcher integration"
+-  ],
+-  "external_reference": {
+-    "url": "https://github.khronos.org/SYCL_Reference/iface/group-algorithms-library.html",
+-    "use": "group reduce and exclusive scan API semantics"
+-  },
+-  "verification": "See validation/manifest.json; no SYCL compiler or target GPU in authoring environment."
+-}
+\ No newline at end of file
++  "validation_here": {
++    "cpu_cpp": true,
++    "python": true,
++    "asan_ubsan": true,
++    "host_syntax_with_mock_only": true,
++    "sycl_device_compile": false,
++    "windows_powershell": false,
++    "a750_execution": false,
++    "isa_disassembly": false,
++    "server_e2e": false
++  }
++}
+diff --git a/build_and_test.cmd b/build_and_test.cmd
+index 18a31ea..2ecf0f9 100644
+--- a/build_and_test.cmd
++++ b/build_and_test.cmd
+@@ -18,5 +18,5 @@ if exist "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" (
+ echo ERROR: use an initialized oneAPI + MSVC developer shell.
+ exit /b 1
+ :run
+-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build_grouping_and_test.ps1" %*
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build_gemm_and_test.ps1" %*
+ exit /b %errorlevel%
+diff --git a/build_and_test_v0.4.cmd b/build_and_test_v0.4.cmd
+new file mode 100644
+index 0000000..18a31ea
+--- /dev/null
++++ b/build_and_test_v0.4.cmd
+@@ -0,0 +1,22 @@
++@echo off
++setlocal
++where cl.exe >nul 2>nul
++if errorlevel 1 goto setup
++where icpx.exe >nul 2>nul
++if not errorlevel 1 goto run
++where icx.exe >nul 2>nul
++if not errorlevel 1 goto run
++:setup
++if defined ONEAPI_ROOT if exist "%ONEAPI_ROOT%\setvars.bat" (
++    call "%ONEAPI_ROOT%\setvars.bat"
++    goto run
++)
++if exist "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" (
++    call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
++    goto run
++)
++echo ERROR: use an initialized oneAPI + MSVC developer shell.
++exit /b 1
++:run
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build_grouping_and_test.ps1" %*
++exit /b %errorlevel%
+diff --git a/include/expert_tiles_reference.hpp b/include/expert_tiles_reference.hpp
+new file mode 100644
+index 0000000..7870dc6
+--- /dev/null
++++ b/include/expert_tiles_reference.hpp
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include "expert_grouping_reference.hpp"
++namespace maple_w2 {
++inline void validate_token_tile(uint32_t r) {
++    if(r!=4 && r!=8) throw std::invalid_argument("multi-token DPAS requires repeat 4 or 8");
++}
++// sum_e ceil(count[e]/R) <= min(J, ceil(J/R) + B - 1), B=E+1 incl. invalid bucket.
++// A host-known bound avoids reading a GPU count back before every launch.
++inline size_t expert_tile_capacity(size_t jobs,uint32_t experts,uint32_t r) {
++    validate_grouping_size(jobs,experts);validate_token_tile(r);
++    return std::min(jobs,(jobs+r-1)/r+experts);
++}
++struct ExpertTilesHost {
++    std::vector<int32_t> expert,begin,rows;
++};
++inline ExpertTilesHost make_expert_tiles_reference(const ExpertGroupingHost& g,uint32_t r) {
++    validate_token_tile(r);
++    if(g.counts.size()<2 || g.counts.size()>257 || g.offsets.size()!=g.counts.size()+1 || g.offsets.front()!=0)
++        throw std::invalid_argument("bad grouped plan shape");
++    const size_t jobs=g.sorted_to_job.size();
++    validate_grouping_size(jobs,uint32_t(g.counts.size()-1));
++    ExpertTilesHost t;
++    for(size_t e=0;e<g.counts.size();++e) {
++        if(g.counts[e]<0 || g.offsets[e]<0 || int64_t(g.offsets[e])+g.counts[e]!=g.offsets[e+1] || size_t(g.offsets[e+1])>jobs)
++            throw std::invalid_argument("bad grouped plan counts/offsets");
++        for(int32_t j=0;j<g.counts[e];j+=int32_t(r)) {
++            t.expert.push_back(int32_t(e));t.begin.push_back(g.offsets[e]+j);
++            t.rows.push_back(std::min(int32_t(r),g.counts[e]-j));
++        }
++    }
++    if(size_t(g.offsets.back())!=jobs)throw std::invalid_argument("group plan does not cover jobs");
++    if(t.expert.size()>expert_tile_capacity(jobs,uint32_t(g.counts.size()-1),r))
++        throw std::logic_error("tile bound violated");
++    return t;
++}
++} // namespace maple_w2
+diff --git a/include/maple_moe.hpp b/include/maple_moe.hpp
+index e1d24dc..8539112 100644
+--- a/include/maple_moe.hpp
++++ b/include/maple_moe.hpp
+@@ -3,6 +3,7 @@
+ #include "maple_w2a8.hpp"
+ #include <array>
+ #include "expert_grouping.hpp"
++#include "maple_w2a8_gemm.hpp"
+ namespace maple_w2 {
+ enum class MoePath { a16, a8_separate, a8_gluquant };
+ struct MoeOptions {
+@@ -16,6 +17,8 @@ struct MoeOptions {
+     // v0.4 sole optimization: stable expert-major job order, built every call.
+     // No multi-token DPAS tile or GEMM; original dot arithmetic is retained.
+     bool expert_grouping=false;
++    // v0.5: 1 retains v0.4 grouped matvec; 4/8 share W2 across activation rows.
++    uint32_t token_tile=1;
+ };
+ struct MoeProblem {
+     Shape gate_shape; // {input width, expert hidden width, experts}; down={hidden,input,experts}
+@@ -34,10 +37,11 @@ struct MoeWorkspace {
+     int32_t *hidden_invalid=nullptr; // Q*topk*H, overwritten by epilogue
+     int32_t *output_invalid=nullptr; // Q*K, overwritten by weighted sum
+     ExpertGroupingWorkspace grouping{};
++    ExpertTilesWorkspace tiles{};
+ };
+ struct MoeStage {const char* label="";sycl::event event;};
+ struct MoeRun {
+-    std::array<MoeStage,12> stages{};size_t count=0;sycl::event done;
++    std::array<MoeStage,16> stages{};size_t count=0;sycl::event done;
+     void add(const char* label,const sycl::event& e){if(count==stages.size())throw std::logic_error("event list full");stages[count++]={label,e};done=e;}
+ };
+ // USM allocations must share this queue's context. No explicit device allocations or readback inside.
+diff --git a/include/maple_w2a8.hpp b/include/maple_w2a8.hpp
+index ae96bbd..4f7753b 100644
+--- a/include/maple_w2a8.hpp
++++ b/include/maple_w2a8.hpp
+@@ -33,6 +33,9 @@ struct A8Run {
+ };
+ A8Run enqueue_a8(sycl::queue&,const DeviceProblem&,A8Options,A8Workspace,float* split_scratch,
+                 const std::vector<sycl::event>& dependencies={});
++// Shared, unchanged G32 quantizer used by the v0.5 multi-token consumer.
++sycl::event enqueue_quantize_a8_g32(sycl::queue&,const DeviceProblem&,A8Workspace,
++    const std::vector<sycl::event>& dependencies={});
+ // Exact signed-INT2/INT8 ISA probe. Throws on wrong results; no emulated fallback.
+ void run_s2s8_probe(sycl::queue&);
+ } // namespace maple_w2
+diff --git a/include/maple_w2a8_gemm.hpp b/include/maple_w2a8_gemm.hpp
+new file mode 100644
+index 0000000..6c55ef1
+--- /dev/null
++++ b/include/maple_w2a8_gemm.hpp
+@@ -0,0 +1,21 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++#include "maple_w2a8.hpp"
++#include "expert_grouping.hpp"
++#include "expert_tiles_reference.hpp"
++namespace maple_w2 {
++// Persistent, context-compatible USM. Descriptor entries [0,*count) are valid.
++// At most capacity tiles are launched, with a device-side count guard. No host readback.
++struct ExpertTilesWorkspace {
++    int32_t *expert=nullptr,*begin=nullptr,*rows=nullptr,*count=nullptr;
++    int32_t *invalid=nullptr; // E+1 entries, overwritten by planner each call
++    size_t capacity=0;uint32_t expert_capacity=0;
++};
++sycl::event enqueue_expert_tiles(sycl::queue&,size_t jobs,uint32_t experts,uint32_t repeat,
++    ExpertGroupingWorkspace,ExpertTilesWorkspace,const std::vector<sycl::event>& dependencies={});
++// G32, s2tile8, split=1 only. Quantizer is the unchanged v0.4 quantizer.
++// staged quantizes this call's x; prequantized consumes this call's dependency producer.
++A8Run enqueue_a8_gemm(sycl::queue&,const DeviceProblem&,A8Options,A8Workspace,
++    const ExpertTilesWorkspace&,uint32_t repeat,const std::vector<sycl::event>& dependencies={});
++void run_multitoken_s2s8_probe(sycl::queue&); // RC4 and RC8, exact signed integer outputs
++} // namespace maple_w2
+diff --git a/scripts/build_gemm_and_test.ps1 b/scripts/build_gemm_and_test.ps1
+new file mode 100644
+index 0000000..5855efd
+--- /dev/null
++++ b/scripts/build_gemm_and_test.ps1
+@@ -0,0 +1,34 @@
++[CmdletBinding()]
++param(
++ [string]$Compiler='', [string]$Builtins='', [string]$Python='python', [string]$Device='A750',
++ [ValidateSet('smoke','quick','full')][string]$Suite='full', [string]$Model='', [string]$CapsuleDir='',
++ [ValidateRange(0,1000)][int]$Layer=0, [ValidateRange(2,10000)][int]$Repeats=28,
++ [ValidateRange(0,128)][int]$ScrubMiB=0, [ValidateSet('4','8')][int]$TokenTile=4, [switch]$NoBuild, [switch]$Synthetic, [switch]$MoeOnly
++)
++$ErrorActionPreference='Stop'
++$Root=Split-Path -Parent $PSScriptRoot
++$Stamp=Get-Date -Format 'yyyyMMdd-HHmmss-fff'
++$Out=Join-Path $Root "build/results/$Stamp-v05-gemm-rc$TokenTile-$Suite"
++$Sources=0;if($Model){$Sources++};if($CapsuleDir){$Sources++};if($Synthetic){$Sources++}
++if($Sources -gt 1){throw 'Choose exactly one of Model, CapsuleDir, Synthetic.'}
++if($Suite -ne 'smoke' -and $Sources -eq 0){throw 'Provide -Model or -CapsuleDir. Use -Synthetic explicitly for synthetic-only tests.'}
++New-Item -ItemType Directory -Force $Out | Out-Null
++$Transcript=$false
++try{
++ Start-Transcript -Path (Join-Path $Out 'run.log') | Out-Null;$Transcript=$true
++ # v0.5 only compares GROUPED RC1 against RC4/8. MoeOnly remains an accepted alias.
++ if(-not $NoBuild){& (Join-Path $PSScriptRoot 'build_windows.ps1') -Compiler $Compiler -Builtins $Builtins -GemmOnly}
++ $Py=Get-Command $Python -ErrorAction SilentlyContinue
++ if(-not $Py){throw 'Python 3.10+ required (standard library only).'}
++ & $Py.Source -m unittest discover -s (Join-Path $Root 'tests') -p 'test_*.py'
++ if($LASTEXITCODE -ne 0){throw 'Python tests failed.'}
++ $RunArgs=@((Join-Path $Root 'tools/run_gemm_suite.py'),'--exe',(Join-Path $Root 'build/maple-gemm-compare.exe'),
++  '--suite',$Suite,'--device',$Device,'--out',(Join-Path $Out 'gemm'),'--token-tile',"$TokenTile",'--repeats',"$Repeats",'--scrub-mib',"$ScrubMiB",'--layer',"$Layer")
++ if($Model){$RunArgs+=@('--model',$Model)}
++ if($CapsuleDir){$RunArgs+=@('--capsule-dir',$CapsuleDir)}
++ if($Synthetic){$RunArgs+=@('--synthetic')}
++ & $Py.Source @RunArgs
++ if($LASTEXITCODE -ne 0){throw "GEMM suite failed. Preserve $Out."}
++ Write-Host "Completed: $Out/gemm/q_speedup.csv"
++ Write-Host 'Only multi-token DPAS added. GROUPED RC1 baseline; grouping + tile plan costs included. No server DLL/settings changed.'
++}finally{if($Transcript){Stop-Transcript | Out-Null}}
+diff --git a/scripts/build_windows.ps1 b/scripts/build_windows.ps1
+index 429f83f..b453014 100644
+--- a/scripts/build_windows.ps1
++++ b/scripts/build_windows.ps1
+@@ -1,5 +1,5 @@
+ [CmdletBinding()]
+-param([string]$Compiler='', [string]$Builtins='', [switch]$GroupingOnly)
++param([string]$Compiler='', [string]$Builtins='', [switch]$GroupingOnly, [switch]$GemmOnly)
+ $ErrorActionPreference='Stop'
+ $Root=Split-Path -Parent $PSScriptRoot
+ $Build=Join-Path $Root 'build'
+@@ -38,33 +38,44 @@ Push-Location $Root
+ try{
+     Invoke-Logged $CC.Source @('--version') (Join-Path $Build 'compiler-version.txt')
+     $CPUFlags=@('-fexceptions','-fcxx-exceptions','-std=c++17','-O2','-Iinclude')
+-    foreach($Test in @(@('reference_tests','maple-reference-tests'),@('w2a8_reference_tests','maple-a8-reference-tests'),@('moe_reference_tests','maple-moe-reference-tests'),@('grouping_reference_tests','maple-grouping-reference-tests'))){
++    foreach($Test in @(@('reference_tests','maple-reference-tests'),@('w2a8_reference_tests','maple-a8-reference-tests'),@('moe_reference_tests','maple-moe-reference-tests'),@('grouping_reference_tests','maple-grouping-reference-tests'),@('gemm_reference_tests','maple-gemm-reference-tests'))){
+         Invoke-Logged $CC.Source ($CPUFlags+@("tests/$($Test[0]).cpp",'-o',"build/$($Test[1]).exe")+$LinkExtra) (Join-Path $Build "$($Test[1])-build.log")
+         Invoke-Logged (Join-Path $Build "$($Test[1]).exe") @() (Join-Path $Build "$($Test[1])-tests.log")
+     }
+     $Flags=@('-fexceptions','-fcxx-exceptions','-std=c++17','-fsycl','-O3','-fno-fast-math','-fsycl-device-code-split=per_kernel','-Iinclude')
+     $Objects=@()
+-    foreach($Source in @('maple_w2a16','maple_w2a8','maple_moe','expert_grouping')){
++    foreach($Source in @('maple_w2a16','maple_w2a8','maple_moe','expert_grouping','expert_tiles','maple_w2a8_gemm')){
+         $Object="build/$Source.obj"
+         Invoke-Logged $CC.Source ($Flags+@('-c',"src/$Source.cpp",'-o',$Object)) (Join-Path $Build "$Source-build.log")
+         $Objects+=@($Object)
+     }
+     $Tools=New-Object 'System.Collections.Generic.List[object]'
+-    $Tools.Add(@('grouping_compare','maple-grouping-compare'))
+-    if(-not $GroupingOnly){
++    if($GemmOnly){$Tools.Add(@('gemm_compare','maple-gemm-compare'))}
++    else{$Tools.Add(@('grouping_compare','maple-grouping-compare'))}
++    if(-not $GroupingOnly -and -not $GemmOnly){
++        $Tools.Add(@('gemm_compare','maple-gemm-compare'))
+         $Tools.Add(@('compare','maple-w2-compare'));$Tools.Add(@('bench','maple-w2-bench'));$Tools.Add(@('moe_compare','maple-moe-compare'))
+     }
+     foreach($Tool in $Tools){
+         Invoke-Logged $CC.Source ($Flags+@("tools/$($Tool[0]).cpp")+$Objects+$LinkExtra+@('-o',"build/$($Tool[1]).exe")) (Join-Path $Build "$($Tool[1])-link.log")
+     }
+-    $Hashes=[ordered]@{}
+-    $SourceFiles=@(Get-ChildItem (Join-Path $Root 'include') -Filter '*.hpp')+@(Get-ChildItem (Join-Path $Root 'src') -Filter '*.cpp')+@(Get-Item (Join-Path $Root 'tools/grouping_compare.cpp'))
+-    foreach($File in ($SourceFiles | Sort-Object FullName)){
+-        $Relative=$File.FullName.Substring($Root.Length+1).Replace('\','/')
+-        $Hashes[$Relative]=(Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
++    # Stamp only binaries actually built in this invocation; never bless a stale exe.
++    foreach($Tool in $Tools){
++        if($Tool[0] -ne 'grouping_compare' -and $Tool[0] -ne 'gemm_compare'){continue}
++        $IsGemm=$Tool[0] -eq 'gemm_compare'
++        $Hashes=[ordered]@{}
++        $SourceFiles=@(Get-ChildItem (Join-Path $Root 'include') -Filter '*.hpp')+@(Get-ChildItem (Join-Path $Root 'src') -Filter '*.cpp')+@(Get-Item (Join-Path $Root "tools/$($Tool[0]).cpp"))
++        foreach($File in ($SourceFiles | Sort-Object FullName)){
++            $Relative=$File.FullName.Substring($Root.Length+1).Replace('\','/')
++            $Hashes[$Relative]=(Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
++        }
++        $ObjectHashes=[ordered]@{}
++        foreach($Object in $Objects){$ObjectHashes[$Object]=(Get-FileHash -LiteralPath (Join-Path $Root $Object) -Algorithm SHA256).Hash.ToLowerInvariant()}
++        $Version='0.4';$ManifestName='grouping-build.json'
++        if($IsGemm){$Version='0.5';$ManifestName='gemm-build.json'}
++        $Manifest=[ordered]@{version=$Version;compiler=$CC.Source;flags=$Flags;builtins=$Builtins;source_sha256=$Hashes;object_sha256=$ObjectHashes;
++            executable_sha256=(Get-FileHash -LiteralPath (Join-Path $Build "$($Tool[1]).exe") -Algorithm SHA256).Hash.ToLowerInvariant()}
++        $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Build $ManifestName) -Encoding UTF8
+     }
+-    $Manifest=[ordered]@{version='0.4';compiler=$CC.Source;flags=$Flags;source_sha256=$Hashes;
+-        executable_sha256=(Get-FileHash -LiteralPath (Join-Path $Build 'maple-grouping-compare.exe') -Algorithm SHA256).Hash.ToLowerInvariant()}
+-    $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Build 'grouping-build.json') -Encoding UTF8
+     Write-Host 'Build complete. GPU kernels compiled once for all comparators. No ggml DLL or launch settings changed.'
+ }finally{Pop-Location}
+diff --git a/src/expert_tiles.cpp b/src/expert_tiles.cpp
+new file mode 100644
+index 0000000..54f43a2
+--- /dev/null
++++ b/src/expert_tiles.cpp
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: MIT
++#include "maple_w2a8_gemm.hpp"
++namespace maple_w2 {
++class ExpertTilePlan;
++sycl::event enqueue_expert_tiles(sycl::queue&q,size_t jobs,uint32_t experts,uint32_t repeat,
++    ExpertGroupingWorkspace g,ExpertTilesWorkspace w,const std::vector<sycl::event>&deps) {
++    const size_t bound=expert_tile_capacity(jobs,experts,repeat);
++    if(!g.counts||!g.offsets||!g.sorted_to_job||g.job_capacity<jobs||g.expert_capacity<experts||
++       !w.expert||!w.begin||!w.rows||!w.count||!w.invalid||w.capacity<bound||w.expert_capacity<experts)
++        throw std::invalid_argument("missing/undersized multi-token tile workspace");
++    // One group/expert, uniform prefix computed once/lane0 then broadcast.
++    // Planner is charged to GEMM arm only; v0.4 count/prefix/scatter are unchanged.
++    constexpr size_t lanes=32;
++    return q.submit([&](sycl::handler&h) {
++        h.depends_on(deps);
++        h.parallel_for<ExpertTilePlan>(sycl::nd_range<1>{sycl::range<1>((experts+1)*lanes),sycl::range<1>(lanes)},
++            [=](sycl::nd_item<1> it) {
++                const uint32_t e=uint32_t(it.get_group_linear_id());const size_t lane=it.get_local_linear_id();
++                int32_t base=0;int bad=0;
++                if(lane==0) {
++                    // Check the complete prefix, not just the current count. This also
++                    // prevents malformed external counts from becoming unsafe descriptors.
++                    int64_t total=0,tilebase=0;
++                    for(uint32_t b=0;b<=experts;++b) {
++                        const int32_t n=g.counts[b];
++                        if(n<0||int64_t(g.offsets[b])!=total)bad=1;
++                        total+=int64_t(n);
++                        if(b<e && n>=0)tilebase+=(int64_t(n)+repeat-1)/repeat;
++                    }
++                    if(total!=int64_t(jobs)||int64_t(g.offsets[experts+1])!=total||tilebase>int64_t(w.capacity))bad=1;
++                    base=bad?0:int32_t(tilebase);w.invalid[e]=bad;
++                    if(e==experts) {
++                        const int64_t end=tilebase+(int64_t(g.counts[e])+repeat-1)/repeat;
++                        *w.count=bad||end<0||end>int64_t(w.capacity)?0:int32_t(end);
++                    }
++                }
++                base=sycl::group_broadcast(it.get_group(),base,0);
++                bad=sycl::group_broadcast(it.get_group(),bad,0);
++                if(bad)return;
++                const int32_t n=g.counts[e];const uint32_t nt=(uint32_t(n)+repeat-1)/repeat;
++                for(uint32_t t=uint32_t(lane);t<nt;t+=lanes) {
++                    const size_t i=size_t(base)+t;
++                    if(i>=w.capacity){if(lane==0)w.invalid[e]=1;return;}
++                    w.expert[i]=int32_t(e);w.begin[i]=g.offsets[e]+int32_t(t*repeat);
++                    w.rows[i]=sycl::min(int32_t(repeat),n-int32_t(t*repeat));
++                }
++            });
++    });
++}
++} // namespace maple_w2
+diff --git a/src/maple_moe.cpp b/src/maple_moe.cpp
+index 3e87f75..b4bbcd9 100644
+--- a/src/maple_moe.cpp
++++ b/src/maple_moe.cpp
+@@ -14,6 +14,15 @@ static void check(const MoeProblem&p,const MoeOptions&o,const MoeWorkspace&w){
+     if(p.layout!=Layout::native_tq2&&p.layout!=Layout::s2tile8)throw std::invalid_argument("MoE supports native or s2tile8");
+     if(!w.gate||!w.up||!w.hidden||!w.down||!w.gate_status||!w.down_status||!w.hidden_invalid||!w.output_invalid)
+         throw std::invalid_argument("missing persistent MoE workspace");
++    if(o.token_tile!=1) {
++        validate_token_tile(o.token_tile);
++        if(!o.expert_grouping || o.gate_kernel.split_k!=1 || o.down_kernel.split_k!=1)
++            throw std::invalid_argument("multi-token GEMM needs grouping and split1/1");
++        if(!w.tiles.expert||!w.tiles.begin||!w.tiles.rows||!w.tiles.count||!w.tiles.invalid||
++           w.tiles.capacity<expert_tile_capacity(size_t(p.tokens)*p.topk,p.gate_shape.experts,o.token_tile)||
++           w.tiles.expert_capacity<p.gate_shape.experts)
++            throw std::invalid_argument("missing/undersized multi-token tile plan workspace");
++    }
+     if(o.expert_grouping) {
+         validate_grouping_size(size_t(p.tokens)*p.topk,p.gate_shape.experts);
+         if(o.path!=MoePath::a8_gluquant||o.input_group!=32||o.hidden_group!=32||p.layout!=Layout::s2tile8)
+@@ -75,10 +84,16 @@ MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&o,const Moe
+         auto gr=enqueue_expert_grouping(q,p.ids,size_t(p.tokens)*p.topk,p.gate_shape.experts,w.grouping,deps);
+         run.add("group_count",gr.count);run.add("group_prefix",gr.prefix);run.add("group_scatter",gr.scatter);
+         gate_deps={gr.scatter};job_order=w.grouping.sorted_to_job;
++        if(o.token_tile!=1) {
++            auto te=enqueue_expert_tiles(q,size_t(p.tokens)*p.topk,p.gate_shape.experts,o.token_tile,w.grouping,w.tiles,gate_deps);
++            run.add("group_tiles",te);gate_deps={te};
++        }
+     }
+     sycl::event gd;
+     if(o.path==MoePath::a16){auto r=enqueue(q,gate,o.gate_kernel,w.gate_split,gate_deps);run.add("gate_up",r.main);if(r.has_reduce)run.add("gate_reduce",r.done);gd=r.done;}
+-    else{auto r=enqueue_a8(q,gate,{o.input_group,A8Mode::staged,o.gate_kernel,job_order},w.input_a8,w.gate_split,gate_deps);
++    else{A8Options ao{o.input_group,A8Mode::staged,o.gate_kernel,job_order};
++        auto r=o.token_tile==1?enqueue_a8(q,gate,ao,w.input_a8,w.gate_split,gate_deps):
++            enqueue_a8_gemm(q,gate,ao,w.input_a8,w.tiles,o.token_tile,gate_deps);
+         run.add("input_quant",r.quant);run.add("gate_up",r.main);if(r.has_reduce)run.add("gate_reduce",r.done);gd=r.done;}
+     if(o.diagnostic_host_waits)gd.wait_and_throw();
+     sycl::event hd;
+@@ -90,7 +105,9 @@ MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&o,const Moe
+     sycl::event dd;
+     if(o.path==MoePath::a16){auto r=enqueue(q,down,o.down_kernel,w.down_split,{hd});run.add("down",r.main);if(r.has_reduce)run.add("down_reduce",r.done);dd=r.done;}
+     else{auto mode=o.path==MoePath::a8_gluquant?A8Mode::prequantized:A8Mode::staged;
+-        auto r=enqueue_a8(q,down,{o.hidden_group,mode,o.down_kernel,job_order},w.hidden_a8,w.down_split,{hd});
++        A8Options ao{o.hidden_group,mode,o.down_kernel,job_order};
++        auto r=o.token_tile==1?enqueue_a8(q,down,ao,w.hidden_a8,w.down_split,{hd}):
++            enqueue_a8_gemm(q,down,ao,w.hidden_a8,w.tiles,o.token_tile,{hd});
+         if(r.has_quant)run.add("hidden_quant",r.quant);run.add("down",r.main);if(r.has_reduce)run.add("down_reduce",r.done);dd=r.done;}
+     if(o.diagnostic_host_waits)dd.wait_and_throw();
+     const size_t n=size_t(p.tokens)*p.gate_shape.k;const uint32_t width=p.gate_shape.k;
+diff --git a/src/maple_w2a8.cpp b/src/maple_w2a8.cpp
+index 5e9b199..1d069b1 100644
+--- a/src/maple_w2a8.cpp
++++ b/src/maple_w2a8.cpp
+@@ -276,6 +276,11 @@ A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w
+         default:return dispatch_layout<256>(q,p,o,w,scratch,deps);
+     }
+ }
++sycl::event enqueue_quantize_a8_g32(sycl::queue& q,const DeviceProblem& p,A8Workspace w,const std::vector<sycl::event>& deps) {
++    if(!p.x||!w.q||!w.scales||!w.invalid||!p.tokens||!p.topk||!p.shape.k||p.shape.k%32)
++        throw std::invalid_argument("invalid G32 quantizer view");
++    return quantize<32>(q,p,w,deps);
++}
+ void run_s2s8_probe(sycl::queue& q) {
+     check_device(q.get_device());
+     constexpr int cases=36;
+diff --git a/src/maple_w2a8_gemm.cpp b/src/maple_w2a8_gemm.cpp
+new file mode 100644
+index 0000000..5cb99fe
+--- /dev/null
++++ b/src/maple_w2a8_gemm.cpp
+@@ -0,0 +1,186 @@
++// SPDX-License-Identifier: MIT
++#include "maple_w2a8_gemm.hpp"
++#include "dg2_validation.hpp"
++#include <sycl/ext/intel/esimd.hpp>
++#include <sycl/ext/intel/esimd/xmx/dpas.hpp>
++#include <iostream>
++namespace maple_w2 {
++namespace es=sycl::ext::intel::esimd;
++namespace xmx=sycl::ext::intel::esimd::xmx;
++template<int R,bool Pair> class Tq2MultiTokenG32;
++template<int R> class MultiTokenS2S8Probe;
++
++template<int R,bool Pair>
++static sycl::event launch_gemm(sycl::queue&q,DeviceProblem p,A8Options opt,A8Workspace a,
++    ExpertTilesWorkspace tiles,const std::vector<sycl::event>&deps) {
++    const size_t jobs=size_t(p.tokens)*p.topk;
++    const uint32_t nr=p.shape.m/8,nk=p.shape.k/256;
++    const size_t capacity=expert_tile_capacity(jobs,p.shape.experts,R);
++    const size_t logical=capacity*nr;
++    const size_t global=((logical+opt.kernel.local_size-1)/opt.kernel.local_size)*opt.kernel.local_size;
++    return q.submit([&](sycl::handler&h) {
++        h.depends_on(deps);
++        h.parallel_for<Tq2MultiTokenG32<R,Pair>>(
++            sycl::nd_range<1>{sycl::range<1>(global),sycl::range<1>(opt.kernel.local_size)},
++            [=](sycl::nd_item<1>it) SYCL_ESIMD_KERNEL {
++                const size_t id=it.get_global_linear_id();if(id>=logical)return;
++                const uint32_t rt=uint32_t(id%nr);const size_t ti=id/nr;
++                const int32_t nt=*tiles.count;
++                if(nt<0 || size_t(nt)>capacity) {if(id==0)p.status[0]=2;return;}
++                if(ti>=size_t(nt))return; // no host readback, unused launch slots exit here
++                const int32_t eid=tiles.expert[ti],start=tiles.begin[ti],rows=tiles.rows[ti];
++                if(eid<0||uint32_t(eid)>p.shape.experts||start<0||rows<1||rows>R||size_t(start)+rows>jobs) {
++                    if(id==0)p.status[0]=2;return; // caller also validates planner and full coverage
++                }
++                es::simd<int32_t,R> original=-1;
++                es::simd<int32_t,R> active=0;
++                #pragma unroll
++                for(int r=0;r<R;++r) {
++                    if(r<rows) {
++                        const int32_t j=opt.job_order[size_t(start)+r];
++                        if(j>=0 && size_t(j)<jobs) {
++                            original[r]=j;
++                            const bool valid_expert=uint32_t(eid)<p.shape.experts;
++                            const bool same_id=valid_expert && p.ids[j]==eid;
++                            active[r]=same_id?1:0;
++                            if(!same_id && rt==0)p.status[j]=valid_expert?2:1;
++                        } else if(rt==0)p.status[size_t(start)+r]=2;
++                    }
++                }
++                es::simd<float,R*8> acc0=0.f,acc1=0.f;
++                if(uint32_t(eid)<p.shape.experts) {
++                    const size_t tb=(size_t(eid)*nr+rt)*nk*528;
++                    es::simd<uint32_t,8> so(0,2);
++                    es::simd<uint32_t,16> bo(0,4);
++                    es::simd<uint32_t,32> ao(0,1);
++                    for(uint32_t kb=0;kb<nk;++kb) {
++                        es::simd<uint16_t,8> ds0=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w0+tb+size_t(kb)*528+512),so);
++                        es::simd<sycl::half,8> h0=ds0.template bit_cast_view<sycl::half>();
++                        es::simd<float,8> dw0=es::convert<float>(h0),dw1=0.f;
++                        if constexpr(Pair) {
++                            es::simd<uint16_t,8> ds1=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w1+tb+size_t(kb)*528+512),so);
++                            es::simd<sycl::half,8> h1=ds1.template bit_cast_view<sycl::half>();dw1=es::convert<float>(h1);
++                        }
++                        for(uint32_t kg=0;kg<256;kg+=32) {
++                            // B: K32 x N8, 2 bits/weight = 64 bytes. Loaded ONCE
++                            // for R activation rows. No expanded global weight tensor.
++                            const size_t wb=tb+size_t(kb)*528+size_t(kg/32)*64;
++                            es::simd<uint32_t,16> b0=es::gather<uint32_t,16>(reinterpret_cast<const uint32_t*>(p.w0+wb),bo),b1=0u;
++                            if constexpr(Pair)b1=es::gather<uint32_t,16>(reinterpret_cast<const uint32_t*>(p.w1+wb),bo);
++                            // Src2 A is row-major [R,32]. Padded rows use all-zero A;
++                            // no pointer for a padded row is dereferenced.
++                            es::simd<int8_t,R*32> av=0;
++                            es::simd<float,R> da=0.f;
++                            #pragma unroll
++                            for(int r=0;r<R;++r) {
++                                if(active[r]) {
++                                    const size_t j=size_t(original[r]),xr=p.per_selection?j:j/p.topk;
++                                    const size_t ax=xr*p.shape.k+kb*256+kg;
++                                    av.template select<32,1>(r*32)=es::gather<int8_t,32>(a.q+ax,ao);
++                                    da[r]=a.scales[ax/32];
++                                }
++                            }
++                            es::simd<int32_t,R*8> i0=0,i1=0;
++                            i0=xmx::dpas<8,R,int32_t,int32_t,uint32_t,int8_t,
++                                xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(i0,b0,av);
++                            if constexpr(Pair)i1=xmx::dpas<8,R,int32_t,int32_t,uint32_t,int8_t,
++                                xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(i1,b1,av);
++                            // G32 is NOT changed to G128/G256. Every token row has
++                            // its OWN activation scale, every 8-output block its dw.
++                            // Preserve v0.4's K/group order and FP32 expression.
++                            #pragma unroll
++                            for(int r=0;r<R;++r) {
++                                es::simd<int32_t,8> z0=i0.template select<8,1>(r*8);
++                                es::simd<float,8> f0=acc0.template select<8,1>(r*8);
++                                f0+=es::convert<float>(z0)*(dw0*float(da[r]));
++                                acc0.template select<8,1>(r*8)=f0;
++                                if constexpr(Pair) {
++                                    es::simd<int32_t,8> z1=i1.template select<8,1>(r*8);
++                                    es::simd<float,8> f1=acc1.template select<8,1>(r*8);
++                                    f1+=es::convert<float>(z1)*(dw1*float(da[r]));
++                                    acc1.template select<8,1>(r*8)=f1;
++                                }
++                            }
++                        }
++                    }
++                }
++                es::simd<uint32_t,8> oo(0,4);
++                #pragma unroll
++                for(int r=0;r<R;++r) {
++                    if(original[r]>=0) {
++                        const size_t oi=size_t(original[r])*p.shape.m+rt*8;
++                        es::simd<float,8> z0=acc0.template select<8,1>(r*8);
++                        es::scatter<float,8>(p.y0+oi,oo,z0);
++                        if constexpr(Pair) {
++                            es::simd<float,8> z1=acc1.template select<8,1>(r*8);
++                            es::scatter<float,8>(p.y1+oi,oo,z1);
++                        }
++                    }
++                }
++            });
++    });
++}
++A8Run enqueue_a8_gemm(sycl::queue&q,const DeviceProblem&p,A8Options o,A8Workspace w,
++    const ExpertTilesWorkspace&tiles,uint32_t repeat,const std::vector<sycl::event>&deps) {
++    validate_dg2_device(q.get_device());(void)nbytes(p.shape);validate_token_tile(repeat);
++    if(!p.tokens||p.tokens>2048||!p.topk||p.topk>256||p.topk>p.shape.experts||p.shape.experts>256||
++       !p.w0||!p.x||!p.ids||!p.y0||!p.status||(p.w1&&!p.y1)||(!p.w1&&p.y1)||
++       !w.q||!w.scales||!w.invalid||!o.job_order||o.group!=32||p.layout!=Layout::s2tile8||
++       o.kernel.split_k!=1||!o.kernel.local_size||o.kernel.local_size>32||
++       (o.mode!=A8Mode::staged&&o.mode!=A8Mode::prequantized)||
++       !tiles.expert||!tiles.begin||!tiles.rows||!tiles.count||!tiles.invalid||
++       tiles.capacity<expert_tile_capacity(size_t(p.tokens)*p.topk,p.shape.experts,repeat)||tiles.expert_capacity<p.shape.experts)
++        throw std::invalid_argument("multi-token GEMM requires G32/s2tile8/grouped/split1 and valid persistent scratch");
++    if(p.activation_type!=ActivationType::f16&&p.activation_type!=ActivationType::f32)
++        throw std::invalid_argument("invalid activation type");
++    A8Run r;std::vector<sycl::event> d=deps;
++    if(o.mode==A8Mode::staged){r.quant=enqueue_quantize_a8_g32(q,p,w,deps);r.has_quant=true;d={r.quant};}
++    if(repeat==4)r.main=p.w1?launch_gemm<4,true>(q,p,o,w,tiles,d):launch_gemm<4,false>(q,p,o,w,tiles,d);
++    else r.main=p.w1?launch_gemm<8,true>(q,p,o,w,tiles,d):launch_gemm<8,false>(q,p,o,w,tiles,d);
++    r.done=r.main;return r;
++}
++
++template<int R>static void probe_repeat(sycl::queue&q) {
++    constexpr int cases=37;
++    std::vector<uint32_t> wb(cases*16,0);
++    std::vector<int8_t> ab(cases*R*32);
++    std::vector<int32_t> cb(cases*R*8),ref(cb.size()),got(cb.size());
++    for(int c=0;c<cases;++c) {
++        for(int k=0;k<32;++k)for(int n=0;n<8;++n) {
++            int b=(c==1?-1:((k*13+n*7+c)%4-2));
++            wb[c*16+(k/16)*8+n]|=(uint32_t(b)&3u)<<(2*(k%16));
++        }
++        for(int r=0;r<R;++r) {
++            for(int k=0;k<32;++k)ab[(c*R+r)*32+k]=int8_t(c==1?-128:(c>=2&&c<34?(k==(c-2+r)%32?1:0):((k*37+r*53+c*19)%256-128)));
++            for(int n=0;n<8;++n) {
++                const size_t i=(c*R+r)*8+n;cb[i]=r*101-n*23+c;int z=cb[i];
++                for(int k=0;k<32;++k){int b=c==1?-1:((k*13+n*7+c)%4-2);z+=int(ab[(c*R+r)*32+k])*b;}
++                ref[i]=z;
++            }
++        }
++    }
++    uint32_t* dw=sycl::malloc_device<uint32_t>(wb.size(),q);
++    int8_t* da=sycl::malloc_device<int8_t>(ab.size(),q);
++    int32_t* dc=sycl::malloc_device<int32_t>(cb.size(),q);int32_t* dy=sycl::malloc_device<int32_t>(got.size(),q);
++    try {
++        if(!dw||!da||!dc||!dy)throw std::bad_alloc();
++        auto ew=q.memcpy(dw,wb.data(),wb.size()*4);auto ea=q.memcpy(da,ab.data(),ab.size());auto ec=q.memcpy(dc,cb.data(),cb.size()*4);
++        auto e=q.submit([&](sycl::handler&h){h.depends_on(std::vector<sycl::event>{ew,ea,ec});
++            h.parallel_for<MultiTokenS2S8Probe<R>>(sycl::range<1>(cases),[=](sycl::id<1>ii) SYCL_ESIMD_KERNEL {
++                const size_t c=ii[0];es::simd<uint32_t,16> bo(0,4);es::simd<uint32_t,32> ao(0,1);es::simd<uint32_t,8> co(0,4);
++                es::simd<uint32_t,16>b=es::gather<uint32_t,16>(dw+c*16,bo);es::simd<int8_t,R*32>a;es::simd<int32_t,R*8>z;
++                #pragma unroll
++                for(int r=0;r<R;++r){a.template select<32,1>(r*32)=es::gather<int8_t,32>(da+(c*R+r)*32,ao);
++                    z.template select<8,1>(r*8)=es::gather<int32_t,8>(dc+(c*R+r)*8,co);}
++                z=xmx::dpas<8,R,int32_t,int32_t,uint32_t,int8_t,xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(z,b,a);
++                #pragma unroll
++                for(int r=0;r<R;++r){es::simd<int32_t,8> row=z.template select<8,1>(r*8);es::scatter<int32_t,8>(dy+(c*R+r)*8,co,row);}
++            });});
++        e.wait_and_throw();q.memcpy(got.data(),dy,got.size()*4).wait_and_throw();
++        if(got!=ref)throw std::runtime_error("multi-token s2/s8 RC"+std::to_string(R)+" probe failed: no RC1 fallback claimed");
++        std::cout<<"MULTITOKEN_DPAS_PROBE PASS repeat="<<R<<" cases="<<cases<<" outputs="<<got.size()<<" (functional only; inspect ISA separately)\n";
++    }catch(...){q.wait();if(dw)sycl::free(dw,q);if(da)sycl::free(da,q);if(dc)sycl::free(dc,q);if(dy)sycl::free(dy,q);throw;}
++    sycl::free(dw,q);sycl::free(da,q);sycl::free(dc,q);sycl::free(dy,q);
++}
++void run_multitoken_s2s8_probe(sycl::queue&q){validate_dg2_device(q.get_device());probe_repeat<4>(q);probe_repeat<8>(q);}
++} // namespace maple_w2
+diff --git a/tests/gemm_reference_tests.cpp b/tests/gemm_reference_tests.cpp
+new file mode 100644
+index 0000000..483763d
+--- /dev/null
++++ b/tests/gemm_reference_tests.cpp
+@@ -0,0 +1,99 @@
++// SPDX-License-Identifier: MIT
++#include "expert_tiles_reference.hpp"
++#include "w2a8_reference.hpp"
++#include <array>
++#include <iostream>
++#include <random>
++#include <set>
++using namespace maple_w2;
++static size_t checks=0;
++static void need(bool x,const char*m){++checks;if(!x)throw std::runtime_error(m);}
++static void plan_case(const std::vector<int32_t>&ids,uint32_t e,uint32_t r) {
++    auto g=group_jobs_reference(ids,e);auto t=make_expert_tiles_reference(g,r);
++    std::vector<int>seen(ids.size());
++    size_t ti=0;
++    // Emulate GPU's per-expert prefix/strided descriptor construction, independently
++    // of the CPU reference's push-back traversal.
++    std::vector<int32_t> ee(t.expert.size(),-1),bb(ee.size(),-1),rr(ee.size(),-1);
++    for(uint32_t b=0;b<=e;++b) {
++        size_t base=0;for(uint32_t j=0;j<b;++j)base+=(size_t(g.counts[j])+r-1)/r;
++        const size_t tiles=(size_t(g.counts[b])+r-1)/r;
++        for(size_t lane=0;lane<32;++lane)for(size_t j=lane;j<tiles;j+=32){size_t i=base+j;
++            ee[i]=int32_t(b);bb[i]=g.offsets[b]+int32_t(j*r);rr[i]=std::min(int32_t(r),g.counts[b]-int32_t(j*r));}
++    }
++    need(ee==t.expert&&bb==t.begin&&rr==t.rows,"GPU tile-plan emulation mismatch");
++    for(;ti<t.expert.size();++ti){need(t.rows[ti]>0&&t.rows[ti]<=int32_t(r),"bad rows");
++        need(t.begin[ti]>=g.offsets[t.expert[ti]]&&t.begin[ti]+t.rows[ti]<=g.offsets[t.expert[ti]+1],"cross-expert tile");
++        for(int32_t m=0;m<t.rows[ti];++m){int32_t j=g.sorted_to_job[t.begin[ti]+m];
++            need(j>=0&&size_t(j)<ids.size(),"unsafe gather");need(grouping_key(ids[j],e)==uint32_t(t.expert[ti]),"wrong expert");++seen[j];}}
++    for(auto n:seen)need(n==1,"dropped/duplicate assignment");
++    need(ti<=expert_tile_capacity(ids.size(),e,r),"launch capacity insufficient");
++}
++template<int R>static void integer_layout_probe() {
++    // Independent packed-B / row-major-A / row-major-C multiply. Rows and columns
++    // have distinct patterns; broadcasting row 0 cannot accidentally pass.
++    for(int test=0;test<80;++test){std::array<uint32_t,16>b{};std::array<int8_t,R*32>a{};std::array<int32_t,R*8>c{};
++        for(int k=0;k<32;++k)for(int n=0;n<8;++n){int v=(test==1?-1:((k*17+n*7+test)%4-2));b[(k/16)*8+n]|=(uint32_t(v)&3u)<<(2*(k%16));}
++        for(int m=0;m<R;++m)for(int k=0;k<32;++k)a[m*32+k]=int8_t(test==1?-128:((m*29+k*37+test*3)%256-128));
++        for(int m=0;m<R;++m)for(int n=0;n<8;++n){c[m*8+n]=m*57-n*39+test;int z=c[m*8+n],ref=z;
++            for(int k=0;k<32;++k){unsigned bits=(b[(k/16)*8+n]>>(2*(k%16)))&3u;int v=int(bits);if(v&2)v-=4;
++                z+=v*int(a[m*32+k]);ref+=(test==1?-1:((k*17+n*7+test)%4-2))*int(a[m*32+k]);}
++            need(z==ref,"repeat-row signed INT2 mapping mismatch");}}
++}
++static std::vector<uint8_t> weights(Shape s,int seed) {
++    std::vector<uint8_t>w(nbytes(s));
++    for(uint32_t e=0;e<s.experts;++e)for(uint32_t m=0;m<s.m;++m)for(uint32_t kb=0;kb<s.k/256;++kb){auto*b=w.data()+native_offset(s,e,m,kb);
++        put16(b+64,float_to_half(float(1+(e*3+m+kb*11+seed)%31)/512));
++        for(unsigned k=0;k<256;++k)set_native_code(b,k,(k*7+m*5+e*2+seed)%3);}
++    return w;
++}
++static void arithmetic(uint32_t r,bool per) {
++    const Shape s{512,16,3};const uint32_t q=13,top=2;const size_t jobs=q*top;
++    std::vector<int32_t>ids(jobs);for(size_t j=0;j<jobs;++j)ids[j]=int32_t((j*7+j/3)%3);
++    // Dense reference never sorts jobs; tiled emulator reads packed storage and restores slots.
++    auto group=group_jobs_reference(ids,3);auto tiles=make_expert_tiles_reference(group,r);
++    const size_t rows=per?jobs:q;std::vector<float>x(rows*s.k);
++    for(size_t i=0;i<x.size();++i)x[i]=float(int(i%67)-33)*(1.f+float((i/32)%11))/113.f;
++    for(size_t i=0;i<32;++i)x[i]=0; // zero group alongside large nonzero per-row scales
++    auto a=quantize_a8(x,uint32_t(rows),s.k,32);
++    for(int projection:{0,1}) {
++        auto w=weights(s,projection);auto packed=repack_s2tile8(w,s);
++        std::vector<float>tiled(jobs*s.m,NAN),scalar(jobs*s.m,0);
++        for(size_t j=0;j<jobs;++j)for(uint32_t n=0;n<s.m;++n){size_t xr=per?j:j/top;float acc=0;
++            for(uint32_t k=0;k<s.k;k+=32){auto*b=w.data()+native_offset(s,ids[j],n,k/256);int z=0;
++                for(unsigned zc=0;zc<32;++zc)z+=(int(native_code(b,k%256+zc))-1)*int(a.q[xr*s.k+k+zc]);
++                float dw=half_to_float(u16(b+64)),da=a.scale[(xr*s.k+k)/32];acc+=float(z)*(dw*da);}
++            scalar[j*s.m+n]=acc;}
++        for(size_t t=0;t<tiles.expert.size();++t)for(uint32_t rt=0;rt<s.m/8;++rt) {
++            std::vector<float>acc(r*8,0.f);
++            for(uint32_t kb=0;kb<s.k/256;++kb){auto*b=packed.data()+tile_offset(s,tiles.expert[t],rt,kb);
++                for(uint32_t kg=0;kg<256;kg+=32){std::vector<int8_t>av(r*32,0);std::vector<float>da(r,0);
++                    for(int32_t row=0;row<tiles.rows[t];++row){size_t j=group.sorted_to_job[tiles.begin[t]+row],xr=per?j:j/top,ax=xr*s.k+kb*256+kg;
++                        std::copy_n(a.q.begin()+ax,32,av.begin()+row*32);da[row]=a.scale[ax/32];}
++                    for(uint32_t row=0;row<r;++row)for(unsigned n=0;n<8;++n){int z=0;
++                        for(unsigned k=0;k<32;++k){unsigned kk=kg+k;uint32_t word=u32(b+(kk/16)*32+n*4);unsigned v=(word>>(2*(kk%16)))&3;
++                            int sv=int(v)-(v&2?4:0);z+=sv*int(av[row*32+k]);}
++                        float dw=half_to_float(u16(b+512+2*n));acc[row*8+n]+=float(z)*(dw*da[row]);}}
++            }
++            for(uint32_t row=0;row<r;++row)for(unsigned n=0;n<8;++n) {
++                if(row<uint32_t(tiles.rows[t]))tiled[size_t(group.sorted_to_job[tiles.begin[t]+row])*s.m+rt*8+n]=acc[row*8+n];
++                else need(acc[row*8+n]==0,"padded row acquired nonzero activation");
++            }
++        }
++        for(size_t i=0;i<scalar.size();++i)need(std::isfinite(tiled[i])&&tiled[i]==scalar[i],"G32/per-row dw/da/output restoration changed");
++    }
++}
++int main()try {
++    std::mt19937 rng(504);
++    for(uint32_t r:{4u,8u})for(uint32_t e:{1u,3u,8u,256u})for(size_t n:std::array<size_t,18>{1,3,4,5,7,8,9,13,31,32,33,104,127,128,129,257,2048,16384}) {
++        std::vector<int32_t>ids(n);for(auto&x:ids)x=int32_t(rng()%e);plan_case(ids,e,r);
++        std::fill(ids.begin(),ids.end(),int32_t(e-1));plan_case(ids,e,r);
++        for(size_t j=0;j<n;++j)ids[j]=j%5==0?-1:j%7==0?int32_t(e):int32_t(j%e);
++        plan_case(ids,e,r);
++    }
++    for(uint32_t bad:{0u,1u,2u,3u,5u,16u}){bool threw=false;try{expert_tile_capacity(8,3,bad);}catch(const std::invalid_argument&){threw=true;}need(threw,"bad repeat accepted");}
++    auto g=group_jobs_reference({0,1,2,0},3);g.offsets[2]++;bool threw=false;try{make_expert_tiles_reference(g,4);}catch(const std::invalid_argument&){threw=true;}need(threw,"corrupt prefix accepted");
++    integer_layout_probe<4>();integer_layout_probe<8>();
++    for(uint32_t r:{4u,8u})for(bool per:{false,true})arithmetic(r,per);
++    std::cout<<"PASS "<<checks<<" CPU checks: compact tile plan, tails, invalid bucket, RC4/8 integer layout, G32 per-row scales, paired projections and original slots. NOT GPU execution.\n";
++}catch(const std::exception&e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
+diff --git a/tests/test_gemm_suite.py b/tests/test_gemm_suite.py
+new file mode 100644
+index 0000000..31d43a0
+--- /dev/null
++++ b/tests/test_gemm_suite.py
+@@ -0,0 +1,86 @@
++import json
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++ROOT=Path(__file__).resolve().parents[1]
++sys.path.insert(0,str(ROOT/'tools'))
++import run_gemm_suite as g
++
++class GemmSuiteTests(unittest.TestCase):
++    def test_full_count(self):
++        self.assertEqual(len(g.cases_for('full')),14)
++        self.assertEqual([c['tokens'] for c in g.cases_for('full') if c.get('model_shape')],list(g.QS))
++    def test_quick_count(self):self.assertEqual(len(g.cases_for('quick')),7)
++    def test_ooo_and_tail_smoke(self):
++        c=g.cases_for('smoke')[1];self.assertEqual(c['tokens'],13);self.assertEqual(c['order'],0)
++    def test_fixed_contract(self):
++        for r in (4,8):
++            for c in g.cases_for('full'):
++                a=g.case_args(c,{},28,0,r);d=dict(zip(a[::2],a[1::2]))
++                self.assertEqual(d['--token-tile'],str(r))
++                self.assertEqual(d['--gate-split'],'1');self.assertEqual(d['--down-split'],'1')
++                self.assertEqual(d['--local'],'4');self.assertEqual(d['--id-mode'],'rotate')
++                self.assertNotIn('--groups',d)
++    def test_capsule_selection(self):
++        caps={k:Path(k+'.mw2') for k in ('gate','up','down')}
++        self.assertNotIn('--gate',g.case_args(g.cases_for('full')[0],caps,28,0))
++        self.assertIn('--gate',g.case_args(g.cases_for('full')[-1],caps,28,0))
++    def stats(self,text):
++        with tempfile.TemporaryDirectory() as td:
++            p=Path(td)/'s.csv';p.write_text('round,phase,variant,wall_us\n'+text)
++            return g.paired_stats(p)
++    def test_paired_delta(self):
++        r=self.stats('1,repeat,x-grouped-rc1,100\n1,repeat,x-gemm-rc4,80\n2,repeat,x-grouped-rc1,90\n2,repeat,x-gemm-rc4,110\n')
++        self.assertEqual(r['gemm_wins'],1);self.assertEqual(r['paired_rounds'],2);self.assertEqual(r['paired_saved_median_us'],0)
++    def test_missing_arm(self):
++        with self.assertRaises(ValueError):self.stats('1,repeat,x-grouped-rc1,100\n')
++    def test_unknown_arm(self):
++        with self.assertRaises(ValueError):self.stats('1,repeat,x,100\n')
++    def test_nan_time(self):
++        with self.assertRaises(ValueError):self.stats('1,repeat,x-gemm-rc4,nan\n')
++    def test_duplicate_arm(self):
++        with self.assertRaises(ValueError):self.stats('1,repeat,x-grouped-rc1,100\n1,repeat,x-grouped-rc1,90\n')
++    def test_sources(self):
++        s=g.sources()
++        for name in ('src/maple_w2a8_gemm.cpp','src/expert_tiles.cpp','tools/gemm_compare.cpp','include/expert_tiles_reference.hpp'):
++            self.assertIn(name,s)
++    def test_no_implicit_stale_build(self):
++        with tempfile.TemporaryDirectory() as td:
++            e=Path(td)/'fake.exe';e.write_bytes(b'x')
++            with self.assertRaises(ValueError):g.verify_build(e)
++            p=e.parent/'gemm-build.json'
++            for v,sh,eh in [('0.4',g.sources(),g.sha256(e)),('0.5',{},g.sha256(e)),('0.5',g.sources(),'bad')]:
++                p.write_text(json.dumps({'version':v,'source_sha256':sh,'executable_sha256':eh}))
++                with self.assertRaises(ValueError):g.verify_build(e)
++    def test_accept_matching_build(self):
++        with tempfile.TemporaryDirectory() as td:
++            e=Path(td)/'fake.exe';e.write_bytes(b'x')
++            v={'version':'0.5','source_sha256':g.sources(),'executable_sha256':g.sha256(e)}
++            (e.parent/'gemm-build.json').write_text(json.dumps(v));self.assertEqual(g.verify_build(e),v)
++    def test_planner_has_no_host_wait(self):
++        s=(ROOT/'src/expert_tiles.cpp').read_text()
++        for name in ('.wait(','.wait_and_throw(','malloc_','memcpy('):self.assertNotIn(name,s)
++    def test_actual_multitoken_dpas(self):
++        s=(ROOT/'src/maple_w2a8_gemm.cpp').read_text()
++        self.assertIn('xmx::dpas<8,R,int32_t,int32_t,uint32_t,int8_t',s)
++        self.assertIn('es::simd<int8_t,R*32>',s);self.assertIn('es::simd<int32_t,R*8>',s)
++        self.assertIn('da[r]=a.scales[ax/32]',s)
++        self.assertIn('if(active[r])',s);self.assertIn('if(original[r]>=0)',s)
++    def test_baseline_is_grouped_not_token_major(self):
++        s=(ROOT/'tools/gemm_compare.cpp').read_text()
++        self.assertIn('for(uint32_t repeat:{1u,token_tile})',s)
++        self.assertIn('o.expert_grouping=true;o.token_tile=repeat;',s)
++        self.assertIn('vars[(r+j)%2]',s)
++    def test_raw_inputs_are_saved(self):
++        s=(ROOT/'tools/gemm_compare.cpp').read_text()
++        for name in ('x.f32','routes.f32','ids_frames.i32','--ids-frames-file'):self.assertIn(name,s)
++    def test_quant_planes_exact(self):
++        s=(ROOT/'tools/gemm_compare.cpp').read_text()
++        self.assertIn('multi-token path altered quantized q/scale planes',s)
++    def test_no_memory_expansion_hidden_in_kernel(self):
++        s=(ROOT/'src/maple_w2a8_gemm.cpp').read_text().split('template<int R>static void probe_repeat')[0]
++        self.assertNotIn('malloc_',s);self.assertNotIn('.wait(',s);self.assertNotIn('memcpy(',s)
++        self.assertIn('p.y0+oi',s)
++if __name__=='__main__':unittest.main()
+diff --git a/tools/gemm_compare.cpp b/tools/gemm_compare.cpp
+new file mode 100644
+index 0000000..5dc4af4
+--- /dev/null
++++ b/tools/gemm_compare.cpp
+@@ -0,0 +1,378 @@
++// SPDX-License-Identifier: MIT
++#include "maple_moe.hpp"
++#include "moe_reference.hpp"
++#include <filesystem>
++#include <sstream>
++#include <set>
++#include <chrono>
++#include <iomanip>
++#include <iostream>
++#include <map>
++#include <memory>
++#include <numeric>
++#include <random>
++#include <cstring>
++#include <array>
++
++using Clock=std::chrono::steady_clock;
++using namespace maple_w2;
++static double micros(Clock::time_point a,Clock::time_point b) {
++    return std::chrono::duration<double,std::micro>(b-a).count();
++}
++static double percentile(std::vector<double> v,double p) {
++    std::sort(v.begin(),v.end()); return v[std::min(v.size()-1,size_t(p*(v.size()-1)))];
++}
++template<class T> struct DeviceMem {
++    sycl::queue *q; T *p=nullptr; size_t count;
++    DeviceMem(sycl::queue& queue,size_t n):q(&queue),count(n) {
++        if(n) p=sycl::malloc_device<T>(n,queue);
++        if(n && !p) throw std::bad_alloc();
++    }
++    ~DeviceMem(){if(p){try {q->wait(); sycl::free(p,*q);} catch(...) { /* process-level diagnostic harness teardown */ }}}
++    DeviceMem(const DeviceMem&)=delete;
++};
++template<class T> static std::vector<T> read_raw(const std::string& path,size_t n) {
++    std::ifstream f(path,std::ios::binary|std::ios::ate);
++    if(!f || f.tellg()!=std::streamoff(n*sizeof(T))) throw std::runtime_error("raw file length mismatch: "+path);
++    std::vector<T> r(n);f.seekg(0);f.read(reinterpret_cast<char*>(r.data()),r.size()*sizeof(T));
++    if(!f) throw std::runtime_error("raw file read failed: "+path); return r;
++}
++static std::vector<uint8_t> synth(Shape s,uint32_t seed) {
++    std::mt19937 gen(seed); std::uniform_int_distribution<int> code(0,2);
++    std::vector<uint8_t> w(nbytes(s),0);
++    for(size_t i=0;i<w.size();i+=66) {
++        for(unsigned j=0;j<64;++j) {
++            unsigned v=0; for(int sh=0;sh<8;sh+=2) v|=unsigned(code(gen))<<sh;
++            w[i+j]=uint8_t(v);
++        }
++        // Per-block scales deliberately differ: no row-scale assumption.
++        float d=(1+int(gen()%31))/512.f;
++        put16(w.data()+i+64,float_to_half(d));
++    }
++    return w;
++}
++static sycl::device choose_device(const std::string& match) {
++    for(const auto& plat:sycl::platform::get_platforms()) for(const auto& d:plat.get_devices(sycl::info::device_type::gpu)) {
++        if(d.get_backend()==sycl::backend::ext_oneapi_level_zero &&
++           d.get_info<sycl::info::device::vendor_id>()==0x8086 &&
++           d.get_info<sycl::info::device::name>().find(match)!=std::string::npos) return d;
++    }
++    throw std::runtime_error("no Intel Level Zero GPU matching '"+match+"'; run sycl-ls and check driver");
++}
++static void print_error(const char* label,const Error& e) {
++    std::cout<<label<<" finite="<<e.finite<<" nmse="<<e.nmse
++      <<" max_abs_over_rms="<<e.max_abs_over_rms<<" max_abs="<<e.max_abs<<"\n";
++}
++struct ChainSample {double wall=0,enqueue_return=0,tail_wait=0,gpu_span=0,kernel_sum=0,gpu_gap=0,group_us=0,core_span=0,gate_us=0,down_us=0,tile_plan_us=0;};
++struct ChainVariant {std::string name;MoeOptions opt;std::vector<ChainSample> samples;bool pass=true;double total_nmse=0;};
++static bool good(const Error&e){return e.finite&&e.nmse<=1e-6&&e.max_abs_over_rms<=.005;}
++static double value(const ChainVariant&v,double ChainSample::*field,double p=.5){std::vector<double>a;for(auto&s:v.samples)a.push_back(s.*field);return percentile(a,p);}
++template<class T>static std::vector<T> copy_back(sycl::queue&q,const T*p,size_t n){std::vector<T>v(n);q.memcpy(v.data(),p,n*sizeof(T)).wait_and_throw();return v;}
++static QuantizedHost capture_quant(sycl::queue&q,const A8Workspace&w,uint32_t rows,uint32_t k,uint32_t group){
++    return {rows,k,group,copy_back(q,w.q,size_t(rows)*k),copy_back(q,w.scales,size_t(rows)*k/group)};}
++static bool quant_ok(const QuantizedHost&got,const std::vector<float>&x){
++    const auto ref=quantize_a8(x,got.rows,got.k,got.group);bool ok=true;
++    for(size_t g=0;g<got.scale.size();++g){float d=got.scale[g],r=ref.scale[g];
++        if(!std::isfinite(d)||d<=0||std::abs(d-r)>std::max(1e-38f,5e-6f*std::abs(r)))ok=false;}
++    for(size_t i=0;i<got.q.size();++i){int delta=int(got.q[i])-int(ref.q[i]);if(got.q[i]==-128)ok=false;
++        if(delta){float a=std::abs(x[i]/ref.scale[i/ref.group]),f=a-std::floor(a);
++            if(std::abs(delta)!=1||std::abs(f-.5f)>2e-4f)ok=false;}}
++    return ok;
++}
++static bool all_zero(const std::vector<int32_t>&v){return std::all_of(v.begin(),v.end(),[](int32_t x){return x==0;});}
++// v0.5: both arms use v0.4 grouping. ONLY grouped RC1 -> RC4/8 plus
++// its tile descriptors change; quantizers, epilogues and output slots remain fixed.
++static void require(bool yes,const std::string& message) {if(!yes)throw std::runtime_error(message);}
++template<class T>static bool bits_equal(const std::vector<T>&a,const std::vector<T>&b) {
++    return a.size()==b.size() && std::memcmp(a.data(),b.data(),a.size()*sizeof(T))==0;
++}
++template<class T>static std::vector<T> pick_tokens(const std::vector<T>&a,const std::vector<uint32_t>&ts,size_t stride) {
++    std::vector<T> out;out.reserve(ts.size()*stride);
++    for(auto t:ts){require((size_t(t)+1)*stride<=a.size(),"sample outside captured tensor");
++        out.insert(out.end(),a.begin()+size_t(t)*stride,a.begin()+(size_t(t)+1)*stride);}
++    return out;
++}
++static QuantizedHost pick_quant(const QuantizedHost&a,const std::vector<uint32_t>&ts,uint32_t rows_per_token) {
++    return {uint32_t(ts.size())*rows_per_token,a.k,a.group,
++        pick_tokens(a.q,ts,size_t(rows_per_token)*a.k),pick_tokens(a.scale,ts,size_t(rows_per_token)*a.k/a.group)};
++}
++static ExpertGroupingHost capture_mapping(sycl::queue&q,const ExpertGroupingWorkspace&w,size_t jobs,uint32_t e) {
++    return {copy_back(q,w.counts,e+1),copy_back(q,w.offsets,e+2),copy_back(q,w.sorted_to_job,jobs)};
++}
++static void grouping_probe(sycl::queue&q) {
++    // Test on an out-of-order queue as well: every stage must depend on its producer.
++    sycl::queue ooo(q.get_context(),q.get_device(),[](sycl::exception_list es){for(auto e:es)std::rethrow_exception(e);},
++                    sycl::property_list{sycl::property::queue::enable_profiling{}});
++    const std::array<size_t,8> sizes={1,8,127,128,129,257,104,16384};
++    size_t cases=0,checked=0;
++    for(uint32_t e:{1u,3u,256u})for(size_t n:sizes) {
++        std::vector<int32_t>ids(n);
++        for(size_t j=0;j<n;++j)ids[j]=j%11==0?-1:(j%17==0?int32_t(e):int32_t((j*37+5)%e));
++        DeviceMem<int32_t>di(ooo,n),c(ooo,e+2),off(ooo,e+3),order(ooo,n+1);
++        ExpertGroupingWorkspace w{c.p,off.p,order.p,n,e};
++        // Poison trailing canaries to detect off-by-one writes. Enqueue depends on all writes.
++        std::vector<sycl::event>deps={ooo.memcpy(di.p,ids.data(),n*4),ooo.fill(c.p,int32_t(-999),e+2),
++            ooo.fill(off.p,int32_t(-999),e+3),ooo.fill(order.p,int32_t(-999),n+1)};
++        auto run=enqueue_expert_grouping(ooo,di.p,n,e,w,deps);run.scatter.wait_and_throw();
++        require(same_grouping(capture_mapping(ooo,w,n,e),group_jobs_reference(ids,e)),"GPU grouping probe: mapping mismatch");
++        require(copy_back(ooo,c.p+e+1,1)[0]==-999&&copy_back(ooo,off.p+e+2,1)[0]==-999&&copy_back(ooo,order.p+n,1)[0]==-999,"GPU grouping probe: canary overwritten");
++        // Reuse SAME workspace with entirely different IDs: stale routing cannot pass.
++        std::fill(ids.begin(),ids.end(),int32_t(e-1));
++        auto upload=ooo.memcpy(di.p,ids.data(),n*4);
++        auto again=enqueue_expert_grouping(ooo,di.p,n,e,w,{upload});again.scatter.wait_and_throw();
++        require(same_grouping(capture_mapping(ooo,w,n,e),group_jobs_reference(ids,e)),"GPU grouping probe: stale mapping");
++        checked+=2*n;cases+=2;
++    }
++    std::cout<<"GROUPING_PROBE PASS cases="<<cases<<" job_entries="<<checked<<" invalid bucket + canaries + changed IDs + OOO\n";
++}
++
++static ExpertTilesHost capture_tiles(sycl::queue&q,const ExpertTilesWorkspace&w) {
++    const int32_t n=copy_back(q,w.count,1)[0];require(n>=0&&size_t(n)<=w.capacity,"unsafe tile count");
++    require(all_zero(copy_back(q,w.invalid,w.expert_capacity+1)),"tile planner rejected counts/offsets");
++    return {copy_back(q,w.expert,size_t(n)),copy_back(q,w.begin,size_t(n)),copy_back(q,w.rows,size_t(n))};
++}
++static bool equal_tiles(const ExpertTilesHost&a,const ExpertTilesHost&b) {
++    return a.expert==b.expert&&a.begin==b.begin&&a.rows==b.rows;
++}
++static void tile_plan_probe(sycl::queue&q) {
++    sycl::queue ooo(q.get_context(),q.get_device(),[](sycl::exception_list es){for(auto e:es)std::rethrow_exception(e);},
++        sycl::property_list{sycl::property::queue::enable_profiling{}});
++    size_t cases=0;
++    for(uint32_t e:{1u,3u,256u})for(size_t jobs:std::array<size_t,9>{1,3,4,7,8,9,104,129,16384}) {
++        DeviceMem<int32_t>di(ooo,jobs),c(ooo,e+1),off(ooo,e+2),order(ooo,jobs);
++        ExpertGroupingWorkspace g{c.p,off.p,order.p,jobs,e};
++        const size_t cap=expert_tile_capacity(jobs,e,4);
++        DeviceMem<int32_t>te(ooo,cap+1),tb(ooo,cap+1),tr(ooo,cap+1),tc(ooo,2),status(ooo,e+2);
++        ExpertTilesWorkspace t{te.p,tb.p,tr.p,tc.p,status.p,cap,e};
++        for(uint32_t r:{4u,8u})for(int frame=0;frame<2;++frame) {
++            std::vector<int32_t>ids(jobs);
++            for(size_t j=0;j<jobs;++j)ids[j]=frame?int32_t(e-1):(j%11==0?-1:j%17==0?int32_t(e):int32_t((j*37+9)%e));
++            std::vector<sycl::event>deps={ooo.memcpy(di.p,ids.data(),jobs*4),ooo.fill(te.p,int32_t(-999),cap+1),
++                ooo.fill(tb.p,int32_t(-999),cap+1),ooo.fill(tr.p,int32_t(-999),cap+1),
++                ooo.fill(tc.p,int32_t(-999),2),ooo.fill(status.p,int32_t(-999),e+2)};
++            auto gr=enqueue_expert_grouping(ooo,di.p,jobs,e,g,deps);
++            auto done=enqueue_expert_tiles(ooo,jobs,e,r,g,t,{gr.scatter});done.wait_and_throw();
++            require(equal_tiles(capture_tiles(ooo,t),make_expert_tiles_reference(group_jobs_reference(ids,e),r)),"GPU tile-plan mismatch/stale counts");
++            require(copy_back(ooo,te.p+cap,1)[0]==-999&&copy_back(ooo,tb.p+cap,1)[0]==-999&&copy_back(ooo,tr.p+cap,1)[0]==-999&&
++                copy_back(ooo,tc.p+1,1)[0]==-999&&copy_back(ooo,status.p+e+1,1)[0]==-999,"tile planner canary overwritten");++cases;
++        }
++    }
++    std::cout<<"TILE_PLAN_PROBE PASS cases="<<cases<<" RC4/8 tails, invalid bucket, changed IDs, OOO and canaries\n";
++}
++template<class T>static void save_raw(const std::filesystem::path&p,const std::vector<T>&v) {
++    std::ofstream f(p,std::ios::binary);if(!f)throw std::runtime_error("cannot save input "+p.string());
++    f.write(reinterpret_cast<const char*>(v.data()),std::streamsize(v.size()*sizeof(T)));
++    if(!f)throw std::runtime_error("failed saving input "+p.string());
++}
++
++struct Snapshot {
++    std::vector<float> gate,up,hidden,down,y;
++    QuantizedHost input_q,hidden_q;
++};
++static Snapshot capture_snapshot(sycl::queue&q,const MoeProblem&p,const MoeWorkspace&w) {
++    size_t jobs=size_t(p.tokens)*p.topk,hn=jobs*p.gate_shape.m,dn=jobs*p.gate_shape.k,xn=size_t(p.tokens)*p.gate_shape.k;
++    Snapshot s{copy_back(q,w.gate,hn),copy_back(q,w.up,hn),copy_back(q,w.hidden,hn),copy_back(q,w.down,dn),copy_back(q,p.y,xn),
++        capture_quant(q,w.input_a8,p.tokens,p.gate_shape.k,32),capture_quant(q,w.hidden_a8,uint32_t(jobs),p.gate_shape.m,32)};
++    require(all_zero(copy_back(q,w.gate_status,jobs))&&all_zero(copy_back(q,w.down_status,jobs))&&
++        all_zero(copy_back(q,w.hidden_invalid,hn))&&all_zero(copy_back(q,w.output_invalid,xn))&&
++        all_zero(copy_back(q,w.input_a8.invalid,xn/32))&&all_zero(copy_back(q,w.hidden_a8.invalid,hn/32)),"nonzero device status");
++    return s;
++}
++static bool near_scheduling_equal(const Error&e) {return e.finite&&e.nmse<=1e-10&&e.max_abs_over_rms<=1e-4;}
++int main(int argc,char**argv)try {
++    std::map<std::string,std::string>a;
++    for(int i=1;i<argc;++i) {
++        std::string k=argv[i];
++        if(k=="--help") {std::cout<<"Maple W2 XMX v0.5: grouped RC1 versus multi-token RC4/8\n"
++            <<"--gate gate.mw2 --up up.mw2 --down down.mw2 OR --k 2048 --hidden 512 --experts 256\n"
++            <<"--tokens 1..2048 --topk 8 --device A750 --out NEW_DIR --repeats 28 --warmup 3\n"
++            <<"--gate-split 1 --down-split 1 --local 4 --in-order 1 --scrub-mib 0\n"
++            <<"--x-file x.f32 --ids-file ids.i32 --routes-file routes.f32\n"
++            <<"--id-mode rotate|fixed --pattern normal|zeros|outliers --probe-only 1 --skip-probe 1\n"
++            <<"Exactly TWO arms: GROUPED RC1 versus GEMM RC4(default)/8 (--token-tile). G32/H32 unchanged.\n";return 0;}
++        if(k.rfind("--",0)!=0||i+1==argc||a.count(k))throw std::invalid_argument("expected unique --key value");a[k]=argv[++i];
++    }
++    const std::set<std::string>allowed={"--gate","--up","--down","--k","--hidden","--experts","--tokens","--topk","--gate-split","--down-split","--local","--x-file","--ids-file","--routes-file","--pattern","--repeats","--warmup","--device","--out","--skip-probe","--probe-only","--in-order","--id-mode","--scrub-mib","--token-tile","--ids-frames-file"};
++    for(auto&kv:a)require(allowed.count(kv.first)!=0,"unknown argument "+kv.first);
++    auto get=[&](const char*k,const char*d){return a.count(k)?a.at(k):std::string(d);};
++    auto num=[&](const char*k,const char*d){auto s=get(k,d);size_t end=0;auto n=std::stoull(s,&end);
++        if(s.empty()||s[0]=='-'||end!=s.size()||n>UINT32_MAX)throw std::invalid_argument("bad unsigned value for "+std::string(k));return uint32_t(n);};
++    auto bit=[&](const char*k,const char*d){auto n=num(k,d);require(n<=1,"boolean must be 0/1");return n!=0;};
++    uint32_t tokens=num("--tokens","1"),topk=num("--topk","8"),repeats=num("--repeats","28"),warmup=num("--warmup","3"),scrub_mib=num("--scrub-mib","0");
++    require(tokens>=1&&tokens<=2048&&topk>=1&&topk<=256&&repeats>=2&&repeats<=10000&&warmup<=1000&&scrub_mib<=128,"benchmark limit exceeded");
++    const uint32_t token_tile=num("--token-tile","4");validate_token_tile(token_tile);
++    auto device=choose_device(get("--device","A750"));bool in_order=bit("--in-order","1");
++    sycl::property_list props=in_order?sycl::property_list{sycl::property::queue::in_order{},sycl::property::queue::enable_profiling{}}:sycl::property_list{sycl::property::queue::enable_profiling{}};
++    sycl::queue q(device,[](sycl::exception_list es){for(auto e:es)std::rethrow_exception(e);},props);
++    std::cout<<std::setprecision(12)<<"device="<<device.get_info<sycl::info::device::name>()<<"\ndriver="<<device.get_info<sycl::info::device::driver_version>()<<'\n';
++    if(bit("--probe-only","0")){run_s2s8_probe(q);run_multitoken_s2s8_probe(q);grouping_probe(q);tile_plan_probe(q);return 0;}
++    if(!bit("--skip-probe","0")){run_s2s8_probe(q);run_multitoken_s2s8_probe(q);grouping_probe(q);tile_plan_probe(q);}
++    bool real=a.count("--gate")!=0;require(real==bool(a.count("--up"))&&real==bool(a.count("--down")),"gate/up/down must be supplied together");
++    Shape s{num("--k","2048"),num("--hidden","512"),num("--experts","256")};std::vector<uint8_t>wg,wu,wd;
++    if(real){auto c=load_capsule(a.at("--gate"));s=c.shape;wg=std::move(c.bytes);auto u=load_capsule(a.at("--up")),d=load_capsule(a.at("--down"));
++        require(u.shape.k==s.k&&u.shape.m==s.m&&u.shape.experts==s.experts&&d.shape.k==s.m&&d.shape.m==s.k&&d.shape.experts==s.experts,"capsule dimensions mismatch");wu=std::move(u.bytes);wd=std::move(d.bytes);}
++    else{wg=synth(s,1234);wu=synth(s,1235);wd=synth({s.m,s.k,s.experts},1236);}
++    require(topk<=s.experts&&s.experts<=256,"invalid expert count");Shape ds{s.m,s.k,s.experts};
++    size_t jobs=checked_mul(tokens,topk),xn=checked_mul(tokens,s.k),hn=checked_mul(jobs,s.m),dn=checked_mul(jobs,s.k);
++    validate_grouping_size(jobs,s.experts);
++    Options go{num("--gate-split","1"),num("--local","4")},dopt{num("--down-split","1"),go.local_size};
++    for(auto pair:std::array<std::pair<uint32_t,Options>,2>{{{s.k,go},{s.m,dopt}}})
++        require((pair.second.split_k==1||pair.second.split_k==2||pair.second.split_k==4||pair.second.split_k==8)&&
++            (pair.first/256)%pair.second.split_k==0&&go.local_size>=1&&go.local_size<=32,"invalid split/local");
++    require(go.split_k==1&&dopt.split_k==1,"v0.5 GEMM A/B fixes gate/down split1/1");
++    const std::string pattern=get("--pattern","normal"),idmode=get("--id-mode","rotate");
++    require(pattern=="normal"||pattern=="zeros"||pattern=="outliers","bad pattern");require(idmode=="rotate"||idmode=="fixed","bad id mode");
++    std::mt19937 rng(98765);std::normal_distribution<float> normal(0,.5f);std::vector<float>x(xn),routes(jobs);
++    if(a.count("--x-file"))x=read_raw<float>(a.at("--x-file"),xn);else for(auto&v:x)v=pattern=="zeros"?0.f:normal(rng);
++    if(!a.count("--x-file")&&pattern=="outliers")for(size_t i=0;i<xn;i+=257)x[i]=16.f;
++    for(auto v:x)require(std::isfinite(v)&&std::abs(v)<=65504.f,"nonfinite/out-of-range activation");
++    if(a.count("--routes-file"))routes=read_raw<float>(a.at("--routes-file"),jobs);
++    else for(uint32_t t=0;t<tokens;++t){float sum=0;for(uint32_t j=0;j<topk;++j){float v=float(j+1);routes[size_t(t)*topk+j]=v;sum+=v;}
++        for(uint32_t j=0;j<topk;++j)routes[size_t(t)*topk+j]/=sum;}
++    validate_routes(routes,tokens,topk);
++    uint32_t rounds=1+warmup+repeats;std::vector<int32_t>ids(checked_mul(rounds,jobs)),fixed;
++    if(a.count("--ids-file"))fixed=read_raw<int32_t>(a.at("--ids-file"),jobs);
++    for(uint32_t r=0;r<rounds;++r){if(!fixed.empty())std::copy(fixed.begin(),fixed.end(),ids.begin()+size_t(r)*jobs);
++        else if(idmode=="fixed"&&r)std::copy(ids.begin(),ids.begin()+jobs,ids.begin()+size_t(r)*jobs);
++        else for(uint32_t t=0;t<tokens;++t){std::vector<int32_t>pool(s.experts);std::iota(pool.begin(),pool.end(),0);
++            if(r==0)std::rotate(pool.begin(),pool.end()-1,pool.end());else std::shuffle(pool.begin(),pool.end(),rng);
++            std::copy(pool.begin(),pool.begin()+topk,ids.begin()+size_t(r)*jobs+size_t(t)*topk);}}
++    require(!(a.count("--ids-file")&&a.count("--ids-frames-file")),"choose fixed ids OR full frame ring");
++    if(a.count("--ids-frames-file"))ids=read_raw<int32_t>(a.at("--ids-frames-file"),ids.size());
++    for(auto id:ids)require(id>=0&&uint32_t(id)<s.experts,"invalid expert ID in benchmark input");
++    const std::filesystem::path out=get("--out","build/results/gemm-manual");
++    require(!std::filesystem::exists(out/"manifest.txt"),"evidence exists; use a new output directory");std::filesystem::create_directories(out);
++    std::ofstream tilecheck(out/"tile_validation.csv");require(bool(tilecheck),"cannot create tile checks");tilecheck<<"snapshot,tile_count,rows_covered,pass\n";
++    std::ofstream manifest(out/"manifest.txt"),numerical(out/"numerical.csv"),mapping(out/"mapping_validation.csv"),pairout(out/"pair_correctness.csv"),hist(out/"routing_histogram.csv"),samples(out/"samples.csv"),stages(out/"stages.csv");
++    require(manifest&&numerical&&mapping&&pairout&&hist&&samples&&stages,"cannot create evidence files");
++    manifest<<"version=0.5\nsole_optimization=grouped_multi_token_DPAS_with_per_call_tile_plan\nbaseline=grouped_RC1\ntoken_tile="<<token_tile<<"\nrequested_dpas=DPAS.s2.s8_depth8_ExecSize8_K32\nisa_disassembly_observed=0\n";
++    manifest<<"device="<<device.get_info<sycl::info::device::name>()<<"\ndriver="<<device.get_info<sycl::info::device::driver_version>()<<'\n';
++    for(auto&kv:a)manifest<<kv.first<<'='<<kv.second<<'\n';
++    manifest<<"weight_source="<<(real?"real_capsules":"synthetic")<<"\nactivation_source="<<(a.count("--x-file")?"captured":"synthetic")
++        <<"\nids_source="<<(a.count("--ids-frames-file")?"captured_frame_ring":(fixed.empty()?idmode:"captured_fixed"))<<"\nroute_source="<<(a.count("--routes-file")?"captured":"synthetic_normalized")<<'\n';
++    manifest<<"Q="<<tokens<<"\nk="<<s.k<<"\nhidden="<<s.m<<"\nexperts="<<s.experts<<"\ntopk="<<topk
++        <<"\nlayout=s2tile8\ninput_group=32\nhidden_group=32\ngluquant=1\nasync=1\nin_order="<<in_order
++        <<"\ngate_split="<<go.split_k<<"\ndown_split="<<dopt.split_k<<"\nlocal="<<go.local_size
++        <<"\ngroup_workgroup=128\nseed=98765\nrepeats="<<repeats<<"\nwarmup="<<warmup<<"\n";
++    manifest<<"scope=one_MoE_layer_no_FA_router_norm_residual_sampling_Vulkan_handoff\n"
++        <<"order=alternate_AB_BA_with_identical_ID_frame_for_both_arms\n"
++        <<"group_plan_rebuilt_every_call=1\ntile_plan_rebuilt_each_GEMM_call=1\nCPU_reference=up_to_3_tokens_per_snapshot_all_topk_outputs\n"
++        <<"full_GPU_AB_comparison=all_tokens_all_intermediates_all_quant_planes_two_snapshots\n"
++        <<"first_timed=post_numerical_validation_NOT_cold_JIT\n";
++    save_raw(out/"x.f32",x);save_raw(out/"routes.f32",routes);save_raw(out/"ids_frames.i32",ids);
++    manifest<<"exact_input_files=x.f32 routes.f32 ids_frames.i32\nframe_ring_rounds="<<rounds<<"\n";
++    std::ofstream thist(out/"tile_histogram.csv");require(bool(thist),"cannot write tile histogram");
++    thist<<"round,phase,selected_jobs,tiles,full_tiles,tail_tiles,padded_rows,valid_row_fraction,launch_capacity\n";
++    hist<<"round,phase,expert,selected_jobs\n";
++    for(uint32_t r=0;r<rounds;++r){std::vector<int32_t>frame(ids.begin()+size_t(r)*jobs,ids.begin()+size_t(r+1)*jobs);
++        auto plan=group_jobs_reference(frame,s.experts);for(uint32_t e=0;e<=s.experts;++e)
++            hist<<r<<','<<(r==0?"first":r<=warmup?"warmup":"repeat")<<','<<e<<','<<plan.counts[e]<<'\n';
++        auto tp=make_expert_tiles_reference(plan,token_tile);size_t full=0;for(auto n:tp.rows)full+=n==int32_t(token_tile);
++        thist<<std::setprecision(12)<<r<<','<<(r==0?"first":r<=warmup?"warmup":"repeat")<<','<<jobs<<','<<tp.rows.size()<<','<<full<<','<<tp.rows.size()-full
++            <<','<<tp.rows.size()*token_tile-jobs<<','<<double(jobs)/(tp.rows.size()*token_tile)<<','<<expert_tile_capacity(jobs,s.experts,token_tile)<<'\n';}
++    thist.flush();
++    hist.flush();
++    auto sg=repack_s2tile8(wg,s),su=repack_s2tile8(wu,s),sd=repack_s2tile8(wd,ds);
++    DeviceMem<uint8_t>dg(q,wg.size()),du(q,wu.size()),dd(q,wd.size()),scrub(q,size_t(scrub_mib)*1024*1024);
++    DeviceMem<float>dx(q,xn),dr(q,jobs),dy(q,xn),yg(q,hn),yu(q,hn),hidden(q,hn),yd(q,dn),
++        gs(q,go.split_k>1?size_t(go.split_k)*hn*2:0),dscratch(q,dopt.split_k>1?size_t(dopt.split_k)*dn:0);
++    DeviceMem<int32_t>di(q,ids.size()),gst(q,jobs),dst(q,jobs),hi(q,hn),oi(q,xn),ai0(q,xn/32),ai1(q,hn/32),
++        gc(q,s.experts+1),gof(q,s.experts+2),order(q,jobs);
++    DeviceMem<int8_t>aq0(q,xn),aq1(q,hn);DeviceMem<float>as0(q,xn/32),as1(q,hn/32);
++    const size_t tile_cap=expert_tile_capacity(jobs,s.experts,token_tile);
++    DeviceMem<int32_t>te(q,tile_cap),tb(q,tile_cap),trws(q,tile_cap),tc(q,1),ti(q,s.experts+1);
++    MoeProblem p{s,tokens,topk,Layout::s2tile8,dg.p,du.p,dd.p,dx.p,dr.p,di.p,dy.p};
++    MoeWorkspace w{yg.p,yu.p,hidden.p,yd.p,gs.p,dscratch.p,{aq0.p,as0.p,ai0.p,false},{aq1.p,as1.p,ai1.p,false},gst.p,dst.p,hi.p,oi.p,
++        {gc.p,gof.p,order.p,jobs,s.experts},{te.p,tb.p,trws.p,tc.p,ti.p,tile_cap,s.experts}};
++    q.memcpy(dg.p,sg.data(),wg.size());q.memcpy(du.p,su.data(),wu.size());q.memcpy(dd.p,sd.data(),wd.size());
++    q.memcpy(dx.p,x.data(),xn*4);q.memcpy(dr.p,routes.data(),jobs*4);q.memcpy(di.p,ids.data(),ids.size()*4);
++    q.memset(gst.p,0,jobs*4);q.memset(dst.p,0,jobs*4);q.wait_and_throw();
++    manifest<<"weight_resident_bytes="<<wg.size()+wu.size()+wd.size()<<"\ngrouping_extra_bytes="<<(jobs+2*s.experts+3)*4
++        <<"\ngemm_tile_extra_bytes="<<(3*tile_cap+s.experts+2)*4<<"\nexplicit_resident_bytes="<<wg.size()+wu.size()+wd.size()+scrub.count+
++        (xn*2+jobs+hn*3+dn+gs.count+dscratch.count+as0.count+as1.count)*4+
++        (ids.size()+jobs*2+hn+xn+ai0.count+ai1.count+gc.count+gof.count+order.count+3*tile_cap+s.experts+2)*4+xn+hn<<'\n';
++    manifest.flush();
++    std::vector<ChainVariant>vars;
++    for(uint32_t repeat:{1u,token_tile}){MoeOptions o;o.path=MoePath::a8_gluquant;o.input_group=o.hidden_group=32;
++        o.gate_kernel=go;o.down_kernel=dopt;o.expert_grouping=true;o.token_tile=repeat;
++        vars.push_back({repeat==1?"w2a8-g32-h32-gluquant-async-grouped-rc1":"w2a8-g32-h32-gluquant-async-gemm-rc"+std::to_string(repeat),o});}
++    std::vector<uint32_t>ts={0,tokens/2,tokens-1};std::sort(ts.begin(),ts.end());ts.erase(std::unique(ts.begin(),ts.end()),ts.end());
++    numerical<<std::setprecision(12)<<"snapshot,variant,cpu_sample_tokens,gate_nmse,up_nmse,swiglu_nmse,down_nmse,weighted_sum_nmse,chain_sample_nmse_vs_f32,quant_pass,kernel_pass\n";
++    mapping<<"snapshot,counts_equal,offsets_equal,permutation_equal,invalid_jobs,pass\n";
++    pairout<<std::setprecision(12)<<"snapshot,stage,nmse,max_abs_over_rms,bitwise_equal,pass\n";
++    for(uint32_t snap:{0u,rounds-1}) {
++        std::cout<<"Numerical snapshot "<<snap<<" Q="<<tokens<<" (full GPU A/B, CPU tokens="<<ts.size()<<")\n";
++        p.ids=di.p+size_t(snap)*jobs;
++        std::vector<int32_t>frame(ids.begin()+size_t(snap)*jobs,ids.begin()+size_t(snap+1)*jobs);
++        auto sid=pick_tokens(frame,ts,topk);auto sx=pick_tokens(x,ts,s.k),sr=pick_tokens(routes,ts,topk);
++        const uint32_t nq=uint32_t(ts.size());
++        auto fg=reference(wg,s,sx,sid,nq,topk,false,false),fu=reference(wu,s,sx,sid,nq,topk,false,false);
++        auto fh=swiglu_reference(fg,fu),fd=reference(wd,ds,fh,sid,nq,topk,true,false),fy=weighted_sum_reference(fd,sr,nq,topk,s.k);
++        Snapshot baseline;
++        for(size_t vi=0;vi<vars.size();++vi){auto&v=vars[vi];
++            // Poison outputs outside timing: missing/duplicate remaps must not reuse old values.
++            q.memset(yg.p,255,hn*4);q.memset(yu.p,255,hn*4);q.memset(hidden.p,255,hn*4);q.memset(yd.p,255,dn*4);q.memset(dy.p,255,xn*4);q.wait_and_throw();
++            auto run=enqueue_moe(q,p,v.opt,w);run.done.wait_and_throw();auto got=capture_snapshot(q,p,w);
++            if(v.opt.expert_grouping){auto actual=capture_mapping(q,w.grouping,jobs,s.experts),ref=group_jobs_reference(frame,s.experts);
++                bool ok=same_grouping(actual,ref);mapping<<snap<<','<<(actual.counts==ref.counts)<<','<<(actual.offsets==ref.offsets)<<','<<(actual.sorted_to_job==ref.sorted_to_job)<<','<<actual.counts.back()<<','<<ok<<'\n';mapping.flush();require(ok,"group mapping mismatch");}
++            if(v.opt.token_tile!=1){auto actual=capture_tiles(q,w.tiles),ref=make_expert_tiles_reference(group_jobs_reference(frame,s.experts),token_tile);
++                bool ok=equal_tiles(actual,ref);tilecheck<<snap<<','<<actual.rows.size()<<','<<std::accumulate(actual.rows.begin(),actual.rows.end(),int64_t(0))<<','<<ok<<'\n';tilecheck.flush();require(ok,"tile descriptors mismatch");}
++            auto g=pick_tokens(got.gate,ts,size_t(topk)*s.m),u=pick_tokens(got.up,ts,size_t(topk)*s.m),h=pick_tokens(got.hidden,ts,size_t(topk)*s.m),
++                d=pick_tokens(got.down,ts,size_t(topk)*s.k),y=pick_tokens(got.y,ts,s.k);
++            auto qi=pick_quant(got.input_q,ts,1),qh=pick_quant(got.hidden_q,ts,topk);
++            bool qp=quant_ok(got.input_q,x)&&quant_ok(got.hidden_q,got.hidden);
++            auto gg=reference_a8(wg,s,qi,sid,nq,topk,false),gu=reference_a8(wu,s,qi,sid,nq,topk,false),
++                gh=swiglu_reference(g,u),gd=reference_a8(wd,ds,qh,sid,nq,topk,true),gy=weighted_sum_reference(d,sr,nq,topk,s.k);
++            auto eg=errors(g,gg),eu=errors(u,gu),eh=errors(h,gh),ed=errors(d,gd),ey=errors(y,gy),et=errors(y,fy);
++            bool ok=qp&&good(eg)&&good(eu)&&good(eh)&&good(ed)&&good(ey)&&et.finite;
++            v.pass&=ok;v.total_nmse=std::max(v.total_nmse,et.nmse);
++            numerical<<snap<<','<<v.name<<','<<nq<<','<<eg.nmse<<','<<eu.nmse<<','<<eh.nmse<<','<<ed.nmse<<','<<ey.nmse<<','<<et.nmse<<','<<qp<<','<<ok<<'\n';numerical.flush();require(ok,"CPU arithmetic/quantizer check failed");
++            if(vi==0)baseline=std::move(got);
++            else {
++                for(auto item:std::array<std::pair<const char*,std::pair<const std::vector<float>*,const std::vector<float>*>>,5>{{
++                    {"gate",{&got.gate,&baseline.gate}},{"up",{&got.up,&baseline.up}},{"hidden",{&got.hidden,&baseline.hidden}},
++                    {"down",{&got.down,&baseline.down}},{"weighted_sum",{&got.y,&baseline.y}}}}) {
++                    auto e=errors(*item.second.first,*item.second.second);bool pass=near_scheduling_equal(e);
++                    pairout<<snap<<','<<item.first<<','<<e.nmse<<','<<e.max_abs_over_rms<<','<<bits_equal(*item.second.first,*item.second.second)<<','<<pass<<'\n';pairout.flush();require(pass,"full GPU A/B output mismatch");}
++                bool exact=bits_equal(got.input_q.q,baseline.input_q.q)&&bits_equal(got.input_q.scale,baseline.input_q.scale)&&
++                    bits_equal(got.hidden_q.q,baseline.hidden_q.q)&&bits_equal(got.hidden_q.scale,baseline.hidden_q.scale);
++                pairout<<snap<<",all_quant_planes,0,0,"<<exact<<','<<exact<<'\n';pairout.flush();require(exact,"multi-token path altered quantized q/scale planes (do not loosen tolerance automatically)");
++            }
++        }
++    }
++    samples<<std::setprecision(12)<<"round,phase,order,variant,enqueue_return_us,tail_wait_us,wall_us,gpu_span_us,kernel_sum_us,gpu_gap_us,group_kernel_us,core_gpu_span_us,gate_up_us,down_us,tile_plan_us\n";
++    stages<<std::setprecision(12)<<"round,phase,variant,stage,start_ns,end_ns,duration_us\n";
++    // Ring contains different ID frames; identical frame per paired round. Grouping is not amortized.
++    for(uint32_t r=0;r<rounds;++r){const char*phase=r==0?"first_timed_post_validation":r<=warmup?"warmup":"repeat";
++        p.ids=di.p+size_t(r)*jobs;
++        for(size_t j=0;j<2;++j){auto&v=vars[(r+j)%2];
++            if(scrub.p){const size_t n=scrub.count/4;auto*b=reinterpret_cast<uint32_t*>(scrub.p);q.parallel_for(sycl::range<1>(n),[=](sycl::id<1>i){b[i[0]]=uint32_t(i[0])+r;}).wait_and_throw();}
++            auto t0=Clock::now();auto run=enqueue_moe(q,p,v.opt,w);auto tr=Clock::now();run.done.wait_and_throw();auto t1=Clock::now();
++            ChainSample sm;sm.enqueue_return=micros(t0,tr);sm.tail_wait=micros(tr,t1);sm.wall=micros(t0,t1);
++            uint64_t begin=0,end=0,core_begin=0,prev=0;
++            for(size_t si=0;si<run.count;++si){auto&st=run.stages[si];auto b=st.event.get_profiling_info<sycl::info::event_profiling::command_start>(),e=st.event.get_profiling_info<sycl::info::event_profiling::command_end>();
++                require(e>=b&&(si==0||b>=prev),"event timestamps violate serialized dependency chain");prev=e;
++                if(si==0)begin=b;end=e;double us=double(e-b)/1000.;sm.kernel_sum+=us;
++                const std::string label=st.label;if(label=="group_tiles")sm.tile_plan_us=us;
++                else if(label.rfind("group_",0)==0)sm.group_us+=us;else if(core_begin==0)core_begin=b;
++                if(label=="gate_up")sm.gate_us=us;if(label=="down")sm.down_us=us;
++                stages<<r<<','<<phase<<','<<v.name<<','<<label<<','<<b<<','<<e<<','<<us<<'\n';}
++            sm.gpu_span=double(end-begin)/1000.;sm.gpu_gap=sm.gpu_span-sm.kernel_sum;sm.core_span=double(end-core_begin)/1000.;
++            samples<<r<<','<<phase<<','<<j<<','<<v.name<<','<<sm.enqueue_return<<','<<sm.tail_wait<<','<<sm.wall<<','<<sm.gpu_span<<','<<sm.kernel_sum<<','<<sm.gpu_gap<<','<<sm.group_us<<','<<sm.core_span<<','<<sm.gate_us<<','<<sm.down_us<<','<<sm.tile_plan_us<<'\n';
++            if(r>warmup)v.samples.push_back(sm);
++        }
++    }
++    // Final routing was rebuilt inside the LAST grouped call, not in an untimed prepass.
++    std::vector<int32_t>last(ids.end()-jobs,ids.end());require(same_grouping(capture_mapping(q,w.grouping,jobs,s.experts),group_jobs_reference(last,s.experts)),"final timed mapping mismatch");
++    require(equal_tiles(capture_tiles(q,w.tiles),make_expert_tiles_reference(group_jobs_reference(last,s.experts),token_tile)),"final timed tile plan mismatch");
++    require(all_zero(copy_back(q,gst.p,jobs))&&all_zero(copy_back(q,dst.p,jobs))&&all_zero(copy_back(q,oi.p,xn)),"timed run device status failure");
++    std::ofstream summary(out/"summary.csv");require(bool(summary),"cannot create summary");
++    summary<<std::setprecision(12)<<"variant,layout,input_group,hidden_group,host_waits,gate_split,down_split,local_size,expert_grouping,token_tile,tile_plan_median_us,group_kernel_median_us,core_gpu_span_median_us,gate_up_median_us,down_median_us,kernel_sum_median_us,gpu_span_median_us,gpu_gap_median_us,enqueue_return_median_us,tail_wait_median_us,wall_median_us,wall_p95_us,speedup_vs_grouped_rc1_same_build,kernel_pass,pair_pass,chain_sample_nmse_vs_f32,tokens,k,hidden,experts,topk,source\n";
++    for(auto&v:vars){const double wall=value(v,&ChainSample::wall),speed=value(vars[0],&ChainSample::wall)/wall;
++        summary<<v.name<<",s2tile8,32,32,0,"<<go.split_k<<','<<dopt.split_k<<','<<go.local_size<<','<<v.opt.expert_grouping<<','<<v.opt.token_tile<<','<<value(v,&ChainSample::tile_plan_us)<<','
++            <<value(v,&ChainSample::group_us)<<','<<value(v,&ChainSample::core_span)<<','<<value(v,&ChainSample::gate_us)<<','<<value(v,&ChainSample::down_us)<<','
++            <<value(v,&ChainSample::kernel_sum)<<','<<value(v,&ChainSample::gpu_span)<<','<<value(v,&ChainSample::gpu_gap)<<','<<value(v,&ChainSample::enqueue_return)<<','
++            <<value(v,&ChainSample::tail_wait)<<','<<wall<<','<<value(v,&ChainSample::wall,.95)<<','<<speed<<','<<v.pass<<",1,"<<v.total_nmse<<','<<tokens<<','<<s.k<<','<<s.m<<','<<s.experts<<','<<topk<<','<<(real?"real_weights":"synthetic")<<'\n';
++        std::cout<<v.name<<" wall_median_us="<<wall<<" p95="<<value(v,&ChainSample::wall,.95)<<" group_kernel_us="<<value(v,&ChainSample::group_us)<<" speedup="<<speed<<" PASS\n";}
++    std::cout<<"RESULT=PASS output="<<out.string()<<"\nGrouping + tile plan INCLUDED each call. RC1 baseline vs actual multi-token DPAS. No Vulkan handoff or server TG.\n";return 0;
++}catch(const std::exception&e){std::cerr<<"ERROR: "<<e.what()<<'\n';return 1;}
+diff --git a/tools/run_gemm_suite.py b/tools/run_gemm_suite.py
+new file mode 100644
+index 0000000..c0e32c5
+--- /dev/null
++++ b/tools/run_gemm_suite.py
+@@ -0,0 +1,167 @@
++#!/usr/bin/env python3
++"""v0.5: paired grouped RC1 / multi-token RC4(8) Q sweep. G32/H32 unchanged."""
++from __future__ import annotations
++import argparse
++import csv
++import hashlib
++import json
++import os
++import platform
++import subprocess
++import shutil
++from pathlib import Path
++import statistics
++import sys
++from typing import Any
++from run_suite import ROOT, run_logged
++
++QS = (1,2,4,8,16,32,64,128,256,512,1024,2048)
++
++def source_files(root: Path=ROOT) -> list[Path]:
++    return sorted([*root.glob('include/*.hpp'), *root.glob('src/*.cpp'),root/'tools/gemm_compare.cpp'])
++
++def sha256(path: Path) -> str:
++    h=hashlib.sha256()
++    with path.open('rb') as f:
++        while chunk:=f.read(4*1024*1024): h.update(chunk)
++    return h.hexdigest()
++
++def sources(root: Path=ROOT) -> dict[str,str]:
++    return {p.relative_to(root).as_posix():sha256(p) for p in source_files(root)}
++
++def cases_for(suite: str) -> list[dict[str,Any]]:
++    cases=[dict(name='gemm-smoke-q1',tokens=1,k=256,hidden=256,experts=8,order=1),
++           dict(name='gemm-smoke-q13-ooo',tokens=13,k=256,hidden=256,experts=8,order=0)]
++    qs=() if suite=='smoke' else (1,4,64,256,2048) if suite=='quick' else QS
++    return cases+[dict(name=f'q{q:04d}',tokens=q,k=2048,hidden=512,experts=256,order=1,model_shape=True) for q in qs]
++
++def case_args(c:dict[str,Any], caps:dict[str,Path], repeats:int, scrub:int, token_tile:int=4) -> list[str]:
++    args=['--tokens',str(c['tokens']),'--k',str(c['k']),'--hidden',str(c['hidden']),'--experts',str(c['experts']),
++          '--topk','8','--token-tile',str(token_tile),'--gate-split','1','--down-split','1','--local','4',
++          '--in-order',str(c['order']),'--repeats',str(min(4,repeats) if not c.get('model_shape') else repeats),
++          '--warmup','3','--pattern','normal','--id-mode','rotate','--scrub-mib',str(scrub),'--skip-probe','1']
++    if c.get('model_shape') and caps:
++        for key,path in caps.items(): args.extend([f'--{key}',str(path)])
++    return args
++
++def verify_build(exe: Path) -> dict[str,Any]:
++    path=exe.parent/'gemm-build.json'
++    if not path.is_file(): raise ValueError(f'missing build manifest {path}; rebuild v0.5 first')
++    built=json.loads(path.read_text(encoding='utf-8-sig'))
++    if built.get('version')!='0.5': raise ValueError('not a v0.5 build')
++    if built.get('source_sha256')!=sources(): raise ValueError('source changed after build; do not use -NoBuild')
++    if built.get('executable_sha256')!=sha256(exe): raise ValueError('executable changed after build')
++    return built
++
++def paired_stats(path:Path) -> dict[str,Any]:
++    with path.open(newline='',encoding='utf-8') as f: rows=list(csv.DictReader(f))
++    rounds:dict[str,dict[str,float]]={}
++    for row in rows:
++        if row['phase']!='repeat': continue
++        arm='gemm' if '-gemm-rc' in row['variant'] else 'baseline' if row['variant'].endswith('grouped-rc1') else None
++        if arm is None: raise ValueError('unknown benchmark arm')
++        if not 0 < float(row['wall_us']) < float('inf'): raise ValueError('non-positive/nonfinite wall sample')
++        if arm in rounds.setdefault(row['round'],{}): raise ValueError('duplicate arm in round')
++        rounds[row['round']][arm]=float(row['wall_us'])
++    if not rounds or any(set(r)!= {'baseline','gemm'} for r in rounds.values()): raise ValueError('unpaired samples')
++    delta=[r['baseline']-r['gemm'] for r in rounds.values()]
++    return dict(paired_rounds=len(delta),gemm_wins=sum(x>0 for x in delta),paired_saved_median_us=statistics.median(delta),
++        paired_speedup_median=statistics.median(r['baseline']/r['gemm'] for r in rounds.values()))
++
++def write_csv(path:Path,rows:list[dict[str,Any]]) -> None:
++    if not rows: return
++    with path.open('w',encoding='utf-8',newline='') as f:
++        w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
++
++def capture_provenance(out:Path,exe:Path) -> dict[str,Any]:
++    result={'platform':platform.platform(),'python':sys.version,'argv':sys.argv,
++            'executable':str(exe.resolve()),'executable_sha256':sha256(exe),
++            'harness_sha256':sha256(Path(__file__))}
++    # No full environment dump: capture only relevant, non-secret runtime switches.
++    keys=('ONEAPI_DEVICE_SELECTOR','SYCL_DEVICE_FILTER','SYCL_CACHE_PERSISTENT','SYCL_CACHE_DIR',
++          'SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS','SYCL_PI_LEVEL_ZERO_USE_COPY_ENGINE',
++          'UR_L0_USE_IMMEDIATE_COMMANDLISTS','UR_L0_USE_COPY_ENGINE','MAPLE_W2_DEVICE_CHECK_EVERY_CALL')
++    result['runtime_environment']={k:os.environ[k] for k in keys if k in os.environ}
++    pd=out/'provenance';pd.mkdir(exist_ok=True)
++    for name in ('compiler-version.txt','gemm-build.json','maple_w2a8_gemm-build.log',
++                 'expert_tiles-build.log','maple_moe-build.log','maple-gemm-compare-link.log'):
++        f=exe.parent/name
++        if f.is_file():shutil.copy2(f,pd/name)
++    git={}
++    for label,args in (('head',['rev-parse','HEAD']),('status',['status','--porcelain']),
++                       ('diff',['diff','--binary']),('cached_diff',['diff','--cached','--binary'])):
++        try:
++            r=subprocess.run(['git','-C',str(ROOT),*args],capture_output=True,timeout=20,check=False)
++            git[label]={'exit':r.returncode}
++            if r.returncode==0:
++                filename=f'git-{label}.txt';(pd/filename).write_bytes(r.stdout)
++                git[label].update(file=filename,sha256=sha256(pd/filename))
++                if label=='head':git[label]['value']=r.stdout.decode(errors='replace').strip()
++            else:git[label]['unavailable']=r.stderr.decode(errors='replace').strip()
++        except (OSError,subprocess.TimeoutExpired) as e:git[label]={'unavailable':str(e)}
++    result['git']=git
++    result['git_note']='A parent repository HEAD alone does not describe untracked lab files; use source/build hashes too.'
++    return result
++
++def main(argv:list[str]|None=None)->int:
++    ap=argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('--exe',type=Path,default=ROOT/'build'/('maple-gemm-compare.exe' if os.name=='nt' else 'maple-gemm-compare'))
++    ap.add_argument('--suite',choices=('smoke','quick','full'),default='full');ap.add_argument('--out',type=Path,required=True)
++    ap.add_argument('--token-tile',type=int,choices=(4,8),default=4);ap.add_argument('--device',default='A750');ap.add_argument('--repeats',type=int,default=28);ap.add_argument('--scrub-mib',type=int,default=0)
++    ap.add_argument('--layer',type=int,default=0);ap.add_argument('--dry-run',action='store_true')
++    group=ap.add_mutually_exclusive_group();group.add_argument('--model',type=Path);group.add_argument('--capsule-dir',type=Path);group.add_argument('--synthetic',action='store_true')
++    ns=ap.parse_args(argv)
++    if ns.layer<0 or not 2<=ns.repeats<=10000 or not 0<=ns.scrub_mib<=128: ap.error('invalid layer/repeats/scrub')
++    plan=cases_for(ns.suite)
++    if ns.dry_run:
++        print(json.dumps({'version':'0.5','only_change':'multi-token DPAS + per-call tile descriptors','token_tile':ns.token_tile,'arms':2,'fixed':'s2tile8 G32/H32 gluquant async split1/1 local4','cases':plan},indent=2));return 0
++    if ns.suite!='smoke' and not(ns.model or ns.capsule_dir or ns.synthetic): ap.error('provide --model/--capsule-dir, or explicitly --synthetic')
++    if not ns.exe.is_file(): ap.error(f'missing executable: {ns.exe}')
++    if (ns.out/'suite_status.json').exists(): ap.error('choose fresh output directory')
++    ns.out.mkdir(parents=True,exist_ok=True)
++    rows=[];speeds=[]
++    status:dict[str,Any]={'version':'0.5','complete':False,'passed':False,'cases':[],
++        'scope':'one layer; grouping EVERY call in both arms, tile plan EVERY GEMM call; no Vulkan or server TG',
++        'source_note':'based on attached v0.4 source zip SHA256 606d2937ff6cf267050112650913561a74532a7e990f55736eea06a2341eb008; not an assertion of the current local merged tree'}
++    try:
++        built=verify_build(ns.exe);status['build']=built;status['provenance']=capture_provenance(ns.out,ns.exe)
++        run_logged([str(ns.exe.resolve()),'--device',ns.device,'--probe-only','1'],ns.out/'probe.log')
++        caps={}
++        if ns.capsule_dir:
++            for key in ('gate','up','down'):
++                path=(ns.capsule_dir/f'{key}.mw2').resolve()
++                if not path.is_file(): raise ValueError(f'missing capsule {path}')
++                caps[key]=path
++        elif ns.model and ns.suite!='smoke':
++            if not ns.model.is_file(): raise ValueError(f'missing model {ns.model}')
++            for key in ('gate','up','down'):
++                path=(ns.out/f'weights/{key}.mw2').resolve();path.parent.mkdir(parents=True,exist_ok=True)
++                run_logged([sys.executable,str(ROOT/'tools/extract_tq2.py'),'--model',str(ns.model.resolve()),'--tensor',f'blk.{ns.layer}.ffn_{key}_exps.weight','--output',str(path)],ns.out/f'extract-{key}.log')
++                caps[key]=path
++        status['capsules']={k:dict(path=str(p),sha256=sha256(p)) for k,p in caps.items()}
++        (ns.out/'plan.json').write_text(json.dumps(plan,indent=2),encoding='utf-8')
++        for c in plan:
++            directory=(ns.out/c['name']).resolve()
++            cmd=[str(ns.exe.resolve()),'--device',ns.device,'--out',str(directory)]+case_args(c,caps,ns.repeats,ns.scrub_mib,ns.token_tile)
++            run_logged(cmd,ns.out/f'{c["name"]}.log')
++            with (directory/'summary.csv').open(newline='',encoding='utf-8') as f: new=list(csv.DictReader(f))
++            if len(new)!=2 or {r['token_tile'] for r in new}!={'1',str(ns.token_tile)} or any(r['expert_grouping']!='1' for r in new) or any(r['kernel_pass']!='1' or r['pair_pass']!='1' for r in new):
++                raise ValueError(f'invalid/failed two-arm summary: {c["name"]}')
++            for r in new:r['case']=c['name']
++            rows.extend(new);write_csv(ns.out/'all_gemm_summary.csv',rows)
++            b=next(r for r in new if r['token_tile']=='1');g=next(r for r in new if r['token_tile']==str(ns.token_tile))
++            speeds.append(dict(case=c['name'],Q=c['tokens'],source=g['source'],token_tile=ns.token_tile,grouped_rc1_us=b['wall_median_us'],gemm_us=g['wall_median_us'],
++                speedup=g['speedup_vs_grouped_rc1_same_build'],group_kernel_us=g['group_kernel_median_us'],tile_plan_us=g['tile_plan_median_us'],
++                gate_speedup=float(b['gate_up_median_us'])/float(g['gate_up_median_us']),down_speedup=float(b['down_median_us'])/float(g['down_median_us']),
++                grouped_rc1_p95_us=b['wall_p95_us'],gemm_p95_us=g['wall_p95_us'],**paired_stats(directory/'samples.csv')))
++            write_csv(ns.out/'q_speedup.csv',speeds)
++            status['cases'].append({'name':c['name'],'passed':True,'argv':cmd,'file_sha256':{f.name:sha256(f) for f in sorted(directory.iterdir()) if f.is_file()}})
++        status['passed']=True;status['complete']=True
++        print(f'PASS {len(plan)} cases/{len(rows)} variants. Read {ns.out / "q_speedup.csv"}.')
++        print('No performance winner or automatic cutover is preselected. Group construction is in BOTH arms; tile planning is included in the GEMM arm. Not server TG.')
++        return 0
++    except (OSError,ValueError,RuntimeError) as exc:
++        status['error']=str(exc);print(f'FAIL {exc}',file=sys.stderr);return 1
++    finally:
++        (ns.out/'suite_status.json').write_text(json.dumps(status,indent=2),encoding='utf-8')
++if __name__=='__main__':raise SystemExit(main())
+diff --git a/tools/stamp_gemm_build.py b/tools/stamp_gemm_build.py
+new file mode 100644
+index 0000000..ce7fdb8
+--- /dev/null
++++ b/tools/stamp_gemm_build.py
+@@ -0,0 +1,11 @@
++#!/usr/bin/env python3
++"""CMake/Linux helper: record current source and executable hashes AFTER rebuilding."""
++import argparse
++import json
++from pathlib import Path
++from run_gemm_suite import sources,sha256
++p=argparse.ArgumentParser(description=__doc__);p.add_argument('--exe',type=Path,required=True);a=p.parse_args()
++if not a.exe.is_file(): p.error('executable not found')
++r={'version':'0.5','source_sha256':sources(),'executable_sha256':sha256(a.exe),
++   'compiler':'user-managed CMake build; consult CMakeCache.txt'}
++(a.exe.parent/'gemm-build.json').write_text(json.dumps(r,indent=2),encoding='utf-8')
