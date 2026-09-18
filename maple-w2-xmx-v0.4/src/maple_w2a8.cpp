@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "maple_w2a8.hpp"
+#include "maple_ptq1a8.hpp"
 #include "dg2_validation.hpp"
 #include <sycl/ext/intel/esimd.hpp>
 #include <sycl/ext/intel/esimd/xmx/dpas.hpp>
@@ -130,12 +131,13 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                 const uint32_t nk=p.shape.k/256, nsp=nk/opt.kernel.split_k;
                 const size_t row_stride=size_t(nk)*66;
                 const size_t eb=size_t(eid)*p.shape.m*row_stride;
-                const size_t tb=(size_t(eid)*rt_count+rt)*nk*528;
+                constexpr size_t tile_stride=L==Layout::ptq1_s2tile8 ? ptq1_tile_bytes : tile_bytes;
+                const size_t tb=(size_t(eid)*rt_count+rt)*nk*tile_stride;
                 const bool writer=rt==0 && (p.per_selection || job%p.topk==0);
                 es::simd<uint32_t,32> off16(0,2),off32(0,4),off8(0,1);
                 for(uint32_t kb=sp*nsp;kb<(sp+1)*nsp;++kb) {
                     es::simd<uint16_t,256> raw0,raw1;
-                    es::simd<uint16_t,8> ds0,ds1;
+                    es::simd<uint16_t,8> ds0,ds1,ds0_hi,ds1_hi;
                     if constexpr(L==Layout::native_tq2) {
                         #pragma unroll
                         for(int r=0;r<8;++r) {
@@ -147,14 +149,35 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                                 ds1[r]=*reinterpret_cast<const uint16_t*>(p.w1+wb+64);
                             }
                         }
+                    } else if constexpr(L==Layout::ptq1_s2tile8) {
+                        es::simd<uint32_t,8> so_lo(0,4),so_hi(2,4);
+                        const size_t sb=tb+size_t(kb)*tile_stride+512;
+                        ds0=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w0+sb),so_lo);
+                        ds0_hi=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w0+sb),so_hi);
+                        if constexpr(Pair) {
+                            ds1=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w1+sb),so_lo);
+                            ds1_hi=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w1+sb),so_hi);
+                        }
                     } else {
                         es::simd<uint32_t,8> so(0,2);
-                        ds0=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w0+tb+size_t(kb)*528+512),so);
-                        if constexpr(Pair) ds1=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w1+tb+size_t(kb)*528+512),so);
+                        const size_t sb=tb+size_t(kb)*tile_stride+512;
+                        ds0=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w0+sb),so);
+                        if constexpr(Pair) ds1=es::gather<uint16_t,8>(reinterpret_cast<const uint16_t*>(p.w1+sb),so);
                     }
                     es::simd<sycl::half,8> hd0=ds0.template bit_cast_view<sycl::half>();
-                    es::simd<float,8> dw0=es::convert<float>(hd0),dw1;
-                    if constexpr(Pair) {es::simd<sycl::half,8> hd1=ds1.template bit_cast_view<sycl::half>();dw1=es::convert<float>(hd1);}
+                    es::simd<float,8> dw0=es::convert<float>(hd0),dw1,dw0_hi,dw1_hi;
+                    if constexpr(L==Layout::ptq1_s2tile8) {
+                        es::simd<sycl::half,8> hd0_hi=ds0_hi.template bit_cast_view<sycl::half>();
+                        dw0_hi=es::convert<float>(hd0_hi);
+                    }
+                    if constexpr(Pair) {
+                        es::simd<sycl::half,8> hd1=ds1.template bit_cast_view<sycl::half>();
+                        dw1=es::convert<float>(hd1);
+                        if constexpr(L==Layout::ptq1_s2tile8) {
+                            es::simd<sycl::half,8> hd1_hi=ds1_hi.template bit_cast_view<sycl::half>();
+                            dw1_hi=es::convert<float>(hd1_hi);
+                        }
+                    }
                     for(uint32_t kg=0;kg<256;kg+=G) {
                         const size_t group_index=xr*(p.shape.k/G)+(kb*256+kg)/G;
                         const size_t ax=xr*p.shape.k+kb*256+kg;
@@ -194,7 +217,7 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                                 if constexpr(Pair) b1=pack_native_s2(raw1,kg+sub);
                             } else {
                                 es::simd<uint32_t,16> bo(0,4);
-                                const size_t wb=tb+size_t(kb)*528+size_t((kg+sub)/32)*64;
+                                const size_t wb=tb+size_t(kb)*tile_stride+size_t((kg+sub)/32)*64;
                                 b0=es::gather<uint32_t,16>(reinterpret_cast<const uint32_t*>(p.w0+wb),bo);
                                 if constexpr(Pair) b1=es::gather<uint32_t,16>(reinterpret_cast<const uint32_t*>(p.w1+wb),bo);
                             }
@@ -205,8 +228,17 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
                             if constexpr(Pair) ia1=xmx::dpas<8,1,int32_t,int32_t,uint32_t,int8_t,
                                 xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(ia1,b1,a32);
                         }
-                        acc0+=es::convert<float>(ia0)*(dw0*da);
-                        if constexpr(Pair) acc1+=es::convert<float>(ia1)*(dw1*da);
+                        if constexpr(L==Layout::ptq1_s2tile8) {
+                            const es::simd<float,8> sw0=kg<128 ? dw0 : dw0_hi;
+                            acc0+=es::convert<float>(ia0)*(sw0*da);
+                            if constexpr(Pair) {
+                                const es::simd<float,8> sw1=kg<128 ? dw1 : dw1_hi;
+                                acc1+=es::convert<float>(ia1)*(sw1*da);
+                            }
+                        } else {
+                            acc0+=es::convert<float>(ia0)*(dw0*da);
+                            if constexpr(Pair) acc1+=es::convert<float>(ia1)*(dw1*da);
+                        }
                     }
                 }
             } else if(rt==0 && sp==0) p.status[job]=1;
@@ -254,6 +286,8 @@ template<int G>
 static A8Run dispatch_layout(sycl::queue& q,DeviceProblem p,A8Options o,A8Workspace w,float* scratch,const std::vector<sycl::event>& deps) {
     if(p.layout==Layout::native_tq2)
         return p.w1?dispatch_mode<G,Layout::native_tq2,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::native_tq2,false>(q,p,o,w,scratch,deps);
+    if(p.layout==Layout::ptq1_s2tile8)
+        return p.w1?dispatch_mode<G,Layout::ptq1_s2tile8,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::ptq1_s2tile8,false>(q,p,o,w,scratch,deps);
     return p.w1?dispatch_mode<G,Layout::s2tile8,true>(q,p,o,w,scratch,deps):dispatch_mode<G,Layout::s2tile8,false>(q,p,o,w,scratch,deps);
 }
 A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w,float* scratch,const std::vector<sycl::event>& deps) {
@@ -261,7 +295,10 @@ A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w
     if(!p.tokens||p.tokens>2048||!p.topk||p.topk>256||p.topk>p.shape.experts||
        !p.w0||!p.x||!p.ids||!p.y0||!p.status||(p.w1&&!p.y1)||(!p.w1&&p.y1)||!w.invalid)
         throw std::invalid_argument("invalid A8 device view");
-    if(p.layout!=Layout::native_tq2 && p.layout!=Layout::s2tile8)throw std::invalid_argument("A8 accepts native or s2tile8, NOT legacy A16 tile8");
+    if(p.layout!=Layout::native_tq2 && p.layout!=Layout::s2tile8 && p.layout!=Layout::ptq1_s2tile8)
+        throw std::invalid_argument("A8 accepts native, s2tile8, or ptq1_s2tile8, NOT legacy A16 tile8");
+    if(p.layout==Layout::ptq1_s2tile8 && o.group==256)
+        throw std::invalid_argument("PTQ1 K128 scales require A8 group 32 or 128");
     if(p.activation_type!=ActivationType::f16&&p.activation_type!=ActivationType::f32)throw std::invalid_argument("invalid activation type");
     if(o.mode!=A8Mode::staged&&o.mode!=A8Mode::fused&&o.mode!=A8Mode::prequantized)throw std::invalid_argument("invalid A8 mode");
     if((o.mode==A8Mode::staged||o.mode==A8Mode::prequantized||w.capture)&&(!w.q||!w.scales))throw std::invalid_argument("A8 staged/capture needs quantized scratch");
