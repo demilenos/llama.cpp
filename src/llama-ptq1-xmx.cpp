@@ -221,6 +221,7 @@ struct Runtime {
     ReusableBuffer<int32_t> invalid;
     uint64_t cache_hits = 0;
     uint64_t imports_created = 0;
+    uint64_t imported_bytes = 0;
 };
 
 std::mutex & runtime_mutex() {
@@ -284,7 +285,8 @@ void * import_tensor(
         ggml_vk_external_lease * lease,
         const ggml_vk_external_api * api,
         const ggml_tensor * tensor,
-        size_t alignment) {
+        size_t alignment,
+        const char * role) {
     ggml_vk_external_span span{};
     require(api && api->abi_version >= 1 && api->get_span &&
             api->get_span(lease, tensor, &span),
@@ -323,6 +325,18 @@ void * import_tensor(
 
         found = state.imports.emplace(span.allocation_id, std::move(allocation)).first;
         ++state.imports_created;
+        state.imported_bytes += span.allocation_size;
+        const char * trace = std::getenv("GGML_VULKAN_PTQ1_XMX_MEMTRACE");
+        if (trace && std::strcmp(trace, "1") == 0) {
+            std::fprintf(stderr,
+                "ptq1-xmx import role=%s alloc=%llu bytes=%zu live_imports=%zu pinned_bytes=%llu tensor_bytes=%zu\n",
+                role ? role : "?",
+                (unsigned long long) span.allocation_id,
+                span.allocation_size,
+                state.imports.size(),
+                (unsigned long long) state.imported_bytes,
+                span.bytes);
+        }
     } else {
         ++state.cache_hits;
     }
@@ -453,9 +467,9 @@ bool execute(
         const uint32_t m = static_cast<uint32_t>(wt->ne[1]);
         const uint32_t tokens = static_cast<uint32_t>(xt->ne[1]);
 
-        auto * w = static_cast<const uint8_t *>(import_tensor(state, lease, api, wt, alignof(uint16_t)));
-        const void * x = import_tensor(state, lease, api, xt, xt->type == GGML_TYPE_F32 ? alignof(float) : alignof(uint16_t));
-        auto * y = static_cast<float *>(import_tensor(state, lease, api, node, alignof(float)));
+        auto * w = static_cast<const uint8_t *>(import_tensor(state, lease, api, wt, alignof(uint16_t), "w"));
+        const void * x = import_tensor(state, lease, api, xt, xt->type == GGML_TYPE_F32 ? alignof(float) : alignof(uint16_t), "x");
+        auto * y = static_cast<float *>(import_tensor(state, lease, api, node, alignof(float), "y"));
 
         constexpr uint32_t a8_group = 32;
         state.ids.ensure(q, tokens);
@@ -560,6 +574,7 @@ void llama_ptq1_xmx_shutdown() {
         state->identity_checked = false;
         state->cache_hits = 0;
         state->imports_created = 0;
+        state->imported_bytes = 0;
     } catch (const std::exception & error) {
         // Fail closed at teardown: keep the heap-owned runtime alive rather than
         // freeing Vulkan memory behind an uncertain Level Zero operation.
