@@ -1,6 +1,6 @@
 #include "ggml-vulkan.h"
-#ifdef GGML_VULKAN_HYBRID
 #include "ggml-vulkan-hybrid.h"
+#ifdef GGML_VULKAN_HYBRID
 #include "ggml-vulkan-hybrid-gpu.h"
 #endif
 #include <vulkan/vulkan_core.h>
@@ -340,6 +340,7 @@ static void ggml_vk_print_device_lost_info(const vk_device& device);
 
 // Prevent simultaneous submissions to the same queue.
 struct vk_queue_handle {
+    std::recursive_mutex external_mutex;
     vk::Queue queue;
     vk_device_ref device;
     std::mutex * device_submit_mutex = nullptr;
@@ -352,6 +353,7 @@ struct vk_queue_handle {
 struct vk_queue_handle_synchronized : vk_queue_handle {
     std::mutex mutex;
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
         // Workaround for NVIDIA driver bug
         std::unique_lock<std::mutex> device_guard;
         if (device_submit_mutex) {
@@ -374,6 +376,7 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
 // Driver guarantees internal synchronization via VK_KHR_internally_synchronized_queues
 struct vk_queue_handle_unsynchronized : vk_queue_handle {
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
         // Workaround for NVIDIA driver bug
         std::unique_lock<std::mutex> device_guard;
         if (device_submit_mutex) {
@@ -856,6 +859,7 @@ static bool ggml_vk_lightning_indexer_k_type_supported(ggml_type type) {
 }
 
 struct vk_device_struct {
+    std::atomic<bool> external_poisoned{false};
     std::recursive_mutex mutex;
     std::mutex queue_submit_mutex;
     mutable std::shared_mutex pinned_memory_mutex;
@@ -1340,8 +1344,8 @@ struct vk_buffer_struct {
         }
 #endif
 
-        device->device.freeMemory(device_memory);
         device->device.destroyBuffer(buffer);
+        device->device.freeMemory(device_memory);
     }
 };
 
@@ -3912,10 +3916,13 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     const vk::MemoryPriorityAllocateInfoEXT mem_priority_info { 1.0f };
 
     vk::MemoryAllocateFlagsInfo mem_flags_info { mem_flags };
+    vk::MemoryDedicatedAllocateInfo dedicated_info;
+    dedicated_info.buffer = buf->buffer;
     vk::ExportMemoryAllocateInfo export_memory_info;
     if (export_win32) {
         export_memory_info.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
-        export_memory_info.setPNext(&mem_flags_info);
+        dedicated_info.setPNext(&mem_flags_info);
+        export_memory_info.setPNext(&dedicated_info);
     }
 
     if (device->memory_priority) {
@@ -4059,6 +4066,24 @@ static vk_buffer ggml_vk_create_buffer_check(vk_device& device, size_t size, vk:
         std::cerr << "ggml_vulkan: " << e.what() << std::endl;
         throw e;
     }
+}
+
+static std::atomic<ggml_custom_op_t> vk_external_callback{nullptr};
+static std::atomic<ggml_vk_external_executor> vk_external_executor{nullptr};
+static bool ggml_vk_external_register_executor(ggml_custom_op_t callback, ggml_vk_external_executor executor, uint32_t version) {
+    if (!callback || !executor || version != 1) return false;
+    auto old = vk_external_callback.load();
+    if (old && old != callback) return false;
+    vk_external_executor.store(executor);
+    vk_external_callback.store(callback);
+    return true;
+}
+static bool ggml_vk_external_node(const ggml_tensor * node) {
+    if (node->op != GGML_OP_CUSTOM || !vk_external_callback.load()) return false;
+    ggml_custom_op_params p; memcpy(&p, node->op_params, sizeof(p));
+    if (p.fun != vk_external_callback.load() || !p.userdata) return false;
+    ggml_vk_external_descriptor d; memcpy(&d, p.userdata, sizeof(d));
+    return d.magic == 0x4d4c345a && d.abi_version == 1;
 }
 
 static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size, bool export_win32 = false) {
@@ -17313,7 +17338,7 @@ static ggml_backend_buffer_t ggml_backend_vk_buffer_type_alloc_buffer(ggml_backe
 
     vk_buffer dev_buffer = nullptr;
     try {
-        dev_buffer = ggml_vk_create_buffer_device(ctx->device, size);
+        dev_buffer = ggml_vk_create_buffer_device(ctx->device, size, vk_external_executor.load() && ctx->device->external_memory_win32);
     } catch (const vk::SystemError& e) {
         return nullptr;
     }
@@ -18728,10 +18753,13 @@ static int32_t find_first_set(uint32_t x) {
     return ret;
 }
 
+#include "ggml-vulkan-external.inc"
+
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
+    if (ctx->device->external_poisoned) return GGML_STATUS_FAILED;
     ctx->device->diag_cgraph = nullptr;
     ctx->device->diag_prev_start = -1;
     ctx->device->diag_prev_end = -1;
@@ -18862,6 +18890,23 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     for (int i = 0; i < cgraph->n_nodes; i++) {
         if (first_node_in_batch) {
             submit_node_idx = i;
+        }
+
+        if (ggml_vk_external_node(cgraph->nodes[i])) {
+            if (ggml_is_empty(cgraph->nodes[i])) continue;
+            if (vk_perf_logger_enabled) return GGML_STATUS_FAILED;
+            if (!first_node_in_batch) {
+                vk_context flush_ctx = ggml_vk_get_compute_ctx(ctx);
+                ggml_vk_ctx_end(flush_ctx);
+                flush_ctx->exit_tensor_idx = -1;
+                ctx->compute_ctx.reset();
+                ggml_vk_compute_forward(ctx, cgraph, cgraph->nodes[submit_node_idx], submit_node_idx, false);
+                submit_after(submit_node_idx, i - 1);
+            }
+            ggml_vk_synchronize(ctx);
+            if (!ggml_vk_external_compute(ctx, cgraph->nodes[i])) return GGML_STATUS_FAILED;
+            first_node_in_batch = true;
+            continue;
         }
 
 #ifdef GGML_VULKAN_HYBRID
@@ -19901,6 +19946,10 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
     ggml_backend_vk_device_context * ctx = (ggml_backend_vk_device_context *)dev->context;
     const vk_device& device = ggml_vk_get_device(ctx->device);
 
+    if (ggml_vk_external_node(op)) {
+        return device->external_memory_win32 && !device->external_poisoned && !vk_perf_logger_enabled;
+    }
+
     const bool uses_bda = (op->op == GGML_OP_IM2COL || op->op == GGML_OP_IM2COL_3D) &&
                           device->shader_int64 && device->buffer_device_address;
 
@@ -20766,11 +20815,16 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void * ggml_backend_vk_reg_get_proc_address(ggml_backend_reg_t, const char * name) {
+    if (!strcmp(name, "ggml_vk_external_register_v1")) return reinterpret_cast<void *>(ggml_vk_external_register_executor);
+    return nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_reg_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {

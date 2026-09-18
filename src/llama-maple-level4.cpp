@@ -1,6 +1,11 @@
 #include "llama-maple-level4.h"
 
 #include "ggml-backend.h"
+#include "ggml-vulkan/ggml-vulkan-hybrid.h"
+#include "level4_device_identity_win32.hpp"
+#include <sycl/ext/oneapi/backend/level_zero.hpp>
+#include <level_zero/ze_api.h>
+#include <windows.h>
 #include "dg2_validation.hpp"
 #include "maple_level4.hpp"
 #include "w2a8_reference.hpp"
@@ -30,7 +35,16 @@ struct CachedWeight {
     std::vector<uint8_t> packed;
 };
 
+struct ImportedAllocation {
+    ze_context_handle_t context = nullptr;
+    void * base = nullptr;
+    uint64_t generation = 0;
+    size_t size = 0;
+    std::shared_ptr<void> owner;
+    ~ImportedAllocation() { if (base) zeMemFree(context, base); }
+};
 struct RuntimeState {
+    std::unordered_map<uint64_t, std::shared_ptr<ImportedAllocation>> imports;
     std::unordered_map<const ggml_tensor *, CachedWeight> weights;
 };
 
@@ -72,7 +86,7 @@ sycl::queue & maple_queue() {
         if (!found) {
             throw std::runtime_error("Maple Level4 requires an Intel Arc A750/A770 Level Zero GPU");
         }
-        result = std::make_unique<sycl::queue>(selected, [](sycl::exception_list errors) {
+        result = std::make_unique<sycl::queue>(sycl::context(selected), selected, [](sycl::exception_list errors) {
             for (const auto & error : errors) {
                 std::rethrow_exception(error);
             }
@@ -197,18 +211,57 @@ std::vector<T> download(sycl::queue & q, const T * source, size_t count) {
     return result;
 }
 
+float * maple_import(RuntimeState & state, sycl::queue & q, ggml_vk_external_lease * lease, const ggml_vk_external_api * api, const ggml_tensor * tensor) {
+    ggml_vk_external_span span{};
+    require(api && api->abi_version == 1 && api->get_span(lease, tensor, &span), "Vulkan tensor is not exportable");
+    struct Handle { HANDLE h; ~Handle() { if (h) CloseHandle(h); } } handle{span.memory_handle};
+    auto zd = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_device());
+    auto zc = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(q.get_context());
+    // bridge_mutex serializes this weak registry across graph-owned states.
+    static std::unordered_map<uint64_t, std::weak_ptr<ImportedAllocation>> registry;
+    auto & imported = state.imports[span.allocation_id];
+    if (!imported) imported = registry[span.allocation_id].lock();
+    if (!imported) {
+        ze_device_luid_ext_properties_t luid{}; luid.stype = ZE_STRUCTURE_TYPE_DEVICE_LUID_EXT_PROPERTIES;
+        ze_device_properties_t props{}; props.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES; props.pNext = &luid;
+        require(zeDeviceGetProperties(zd, &props) == ZE_RESULT_SUCCESS, "Cannot query Level Zero identity");
+        maple_w2::level4::zc::DeviceIdentity a{span.vendor, span.device, span.node_mask, {}, span.luid_valid};
+        maple_w2::level4::zc::DeviceIdentity b{props.vendorId, props.deviceId, luid.nodeMask, {}, true};
+        std::memcpy(a.luid.data(), span.luid, 8); std::memcpy(b.luid.data(), luid.luid.id, 8);
+        std::fprintf(stderr, "Maple identity vk_mask=%u ze_mask=%u vk_uuid=", a.node_mask, b.node_mask);
+        for (auto byte : span.device_uuid) std::fprintf(stderr, "%02x", unsigned(byte));
+        std::fprintf(stderr, " ze_uuid="); for (auto byte : props.uuid.id) std::fprintf(stderr, "%02x", unsigned(byte)); std::fprintf(stderr, "\n");
+        maple_w2::level4::zc::require_same_windows_device(a, b, span.device_uuid, props.uuid.id, (props.flags & ZE_DEVICE_PROPERTY_FLAG_SUBDEVICE) != 0);
+        auto candidate = std::make_shared<ImportedAllocation>();
+        candidate->context = zc; candidate->owner = span.owner; candidate->size = span.allocation_size; candidate->generation = span.generation;
+        ze_external_memory_import_win32_handle_t imp{}; imp.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_WIN32;
+        imp.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_OPAQUE_WIN32; imp.handle = span.memory_handle;
+        ze_device_mem_alloc_desc_t desc{}; desc.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC; desc.pNext = &imp;
+        require(zeMemAllocDevice(zc, &desc, span.allocation_size, 0, zd, &candidate->base) == ZE_RESULT_SUCCESS, "Level Zero external import failed");
+        imported = std::move(candidate);
+        registry[span.allocation_id] = imported;
+        if (registry.size() > 256) {
+            for (auto it = registry.begin(); it != registry.end();) {
+                if (it->second.expired()) it = registry.erase(it); else ++it;
+            }
+        }
+    }
+    require(imported->context == zc && imported->generation == span.generation && imported->size == span.allocation_size, "Stale external allocation");
+    require(span.bind_offset <= span.allocation_size && span.tensor_offset <= span.allocation_size - span.bind_offset, "External offset overflow");
+    size_t offset = span.bind_offset + span.tensor_offset;
+    require(offset % alignof(float) == 0 && span.bytes <= span.allocation_size - offset, "External tensor out of range");
+    return reinterpret_cast<float *>(static_cast<uint8_t *>(imported->base) + offset);
+}
+
 } // namespace
 
-void llama_maple_level4_compute(ggml_tensor * dst, int ith, int nth, void * userdata) {
-    if (ith != 0) {
-        return;
-    }
-    try {
+static void maple_compute(ggml_tensor * dst, void * userdata, ggml_vk_external_lease * lease, const ggml_vk_external_api * api) {
+    {
         require(dst != nullptr && userdata != nullptr, "Maple Level4 callback received null state");
         auto & p = *static_cast<llama_maple_level4_params *>(userdata);
         std::lock_guard<std::mutex> lock(bridge_mutex());
         const uint32_t tokens = static_cast<uint32_t>(dst->ne[1]);
-        require(nth > 0 && tokens > 0, "Maple Level4 invalid custom-node parallelism or token count");
+        require(tokens > 0, "Maple Level4 invalid token count");
         require(dst->type == GGML_TYPE_F32 && ggml_is_contiguous(dst) && dst->data != nullptr,
                 "Maple Level4 destination must be contiguous F32");
         require(p.hidden && p.attention && p.q_width && p.kv_width && p.ffn && p.experts && p.topk,
@@ -236,17 +289,14 @@ void llama_maple_level4_compute(ggml_tensor * dst, int ith, int nth, void * user
         config.q_width = p.q_width; config.kv_width = p.kv_width; config.ffn = p.ffn;
         config.experts = p.experts; config.topk = p.topk; config.entry = entry;
         config.ffn_epsilon = p.epsilon; config.next_epsilon = p.epsilon;
-        auto plan = maple_w2::level4::make_plan(config);
+        auto plan = maple_w2::level4::make_plan(config, 1, 1, 1, 1, 1, 1, true);
         auto state = runtime_for(p);
         auto & q = maple_queue();
 
+        float * imported_x = maple_import(*state, q, lease, api, dst->src[0]);
+        float * imported_a = entry != Entry::bootstrap ? maple_import(*state, q, lease, api, attention) : nullptr;
+        float * imported_out = maple_import(*state, q, lease, api, dst);
         const size_t hidden_n = size_t(tokens) * p.hidden;
-        const size_t attention_n = size_t(tokens) * p.attention;
-        DeviceBuffer<float> residual(q, hidden_n), attention_dev(q, entry == Entry::bootstrap ? 0 : attention_n);
-        upload(q, residual, static_cast<const float *>(dst->src[0]->data), hidden_n);
-        if (entry != Entry::bootstrap) {
-            upload(q, attention_dev, static_cast<const float *>(attention->data), attention_n);
-        }
         DeviceBuffer<uint8_t> arena(q, plan.bytes);
         auto workspace = maple_w2::level4::bind_workspace(arena.data, plan.bytes, std::move(plan));
 
@@ -271,52 +321,60 @@ void llama_maple_level4_compute(ggml_tensor * dst, int ith, int nth, void * user
         if (!next_norm_h.empty()) upload(q, next_norm, next_norm_h.data(), next_norm_h.size());
         if (!router_h.empty()) upload(q, router, router_h.data(), router_h.size());
 
-        DeviceBuffer<float> hidden_out(q, hidden_n), q_out(q, entry == Entry::terminal ? 0 : size_t(tokens) * p.q_width);
-        DeviceBuffer<float> k_out(q, entry == Entry::terminal ? 0 : size_t(tokens) * p.kv_width), v_out(q, entry == Entry::terminal ? 0 : size_t(tokens) * p.kv_width);
         maple_w2::level4::Weights weights;
         weights.o = o.first.data; weights.q = qkv_q.first.data; weights.k = qkv_k.first.data; weights.v = qkv_v.first.data;
         weights.gate = gate.first.data; weights.up = up.first.data; weights.down = down.first.data;
         weights.ffn_norm = ffn_norm.data; weights.next_attn_norm = next_norm.data; weights.router = router.data;
         weights.current_layer = p.current_layer; weights.next_layer = p.next_layer;
         weights.dense_layout = maple_w2::Layout::s2tile8; weights.moe_layout = maple_w2::Layout::s2tile8;
-        maple_w2::level4::Bindings bindings{
-            maple_w2::level4::contiguous_read(residual.data, tokens, p.hidden),
-            entry == Entry::bootstrap ? maple_w2::level4::ReadView{} : maple_w2::level4::contiguous_read(attention_dev.data, tokens, p.attention),
-            maple_w2::level4::contiguous_write(hidden_out.data, tokens, p.hidden),
-            entry == Entry::terminal ? maple_w2::level4::WriteView{} : maple_w2::level4::contiguous_write(q_out.data, tokens, p.q_width),
-            entry == Entry::terminal ? maple_w2::level4::WriteView{} : maple_w2::level4::contiguous_write(k_out.data, tokens, p.kv_width),
-            entry == Entry::terminal ? maple_w2::level4::WriteView{} : maple_w2::level4::contiguous_write(v_out.data, tokens, p.kv_width)};
+        maple_w2::level4::Bindings bindings{};
         maple_w2::level4::Options options;
+        options.boundary = maple_w2::level4::BoundaryPolicy::direct_required;
         options.moe.gate_tokens_per_tile = 1; options.moe.down_tokens_per_tile = 1; options.moe.token_tile = p.token_tile;
         options.moe.clamp = p.clamp; options.moe.input_group = 32; options.moe.hidden_group = 32;
         options.moe.expert_grouping = true; options.moe.schedule = maple_w2::MoeSchedule::grouped;
         options.moe.gate_kernel.split_k = 1; options.moe.gate_kernel.local_size = 4;
         options.moe.down_kernel.split_k = 1; options.moe.down_kernel.local_size = 4;
+        {
+            float * x = imported_x;
+            float * a = imported_a;
+            float * out = imported_out;
+            bindings.residual = maple_w2::level4::contiguous_read(x, tokens, p.hidden);
+            bindings.attention = entry == Entry::bootstrap ? maple_w2::level4::ReadView{} : maple_w2::level4::contiguous_read(a, tokens, p.attention);
+            bindings.hidden = maple_w2::level4::contiguous_write(out, tokens, p.hidden);
+            if (entry != Entry::terminal) {
+                out += hidden_n;
+                bindings.q = maple_w2::level4::contiguous_write(out, tokens, p.q_width); out += size_t(tokens) * p.q_width;
+                bindings.k = maple_w2::level4::contiguous_write(out, tokens, p.kv_width); out += size_t(tokens) * p.kv_width;
+                bindings.v = maple_w2::level4::contiguous_write(out, tokens, p.kv_width);
+            }
+            maple_w2::level4::validate(weights, bindings, options, workspace);
+            require(api->release_to_external(lease), "Vulkan external release failed");
+        }
         auto run = maple_w2::level4::enqueue(q, weights, bindings, options, workspace);
         run.done.wait_and_throw();
         auto status = download(q, run.status, tokens);
         for (int32_t value : status) require(value == 0, "Maple Level4 device status reported nonfinite or invalid data");
-        auto hidden = download(q, hidden_out.data, hidden_n);
-        auto qh = entry == Entry::terminal ? std::vector<float>() : download(q, q_out.data, size_t(tokens) * p.q_width);
-        auto kh = entry == Entry::terminal ? std::vector<float>() : download(q, k_out.data, size_t(tokens) * p.kv_width);
-        auto vh = entry == Entry::terminal ? std::vector<float>() : download(q, v_out.data, size_t(tokens) * p.kv_width);
-        std::vector<float> output;
-        output.reserve(size_t(dst->ne[0]) * tokens);
-        for (uint32_t t = 0; t < tokens; ++t) {
-            output.insert(output.end(), hidden.begin() + size_t(t) * p.hidden, hidden.begin() + size_t(t + 1) * p.hidden);
-            if (entry != Entry::terminal) {
-                output.insert(output.end(), qh.begin() + size_t(t) * p.q_width, qh.begin() + size_t(t + 1) * p.q_width);
-                output.insert(output.end(), kh.begin() + size_t(t) * p.kv_width, kh.begin() + size_t(t + 1) * p.kv_width);
-                output.insert(output.end(), vh.begin() + size_t(t) * p.kv_width, vh.begin() + size_t(t + 1) * p.kv_width);
-            }
+        {
+            require(run.boundary_traffic.bytes() == 0, "Level4 unexpectedly copied a boundary");
+            std::fprintf(stderr, "maple-level4 complete layer=%d tokens=%u token_tile=%u host_staged=0 boundary_copy_bytes=0 backend=Vulkan\n", p.current_layer, tokens, p.token_tile);
+            return;
         }
-        require_finite(output.data(), output.size(), "Maple Level4 output");
-        std::memcpy(dst->data, output.data(), output.size() * sizeof(float));
-        std::fprintf(stderr, "maple-level4 complete layer=%d entry=%s tokens=%u token_tile=%u host_staged=1\n",
-                     p.current_layer, entry == Entry::bootstrap ? "bootstrap" : (entry == Entry::terminal ? "terminal" : "advance"), tokens, p.token_tile);
-    } catch (const std::exception & error) {
-        GGML_ABORT("Maple Level4 callback failed: %s", error.what());
-    } catch (...) {
-        GGML_ABORT("Maple Level4 callback failed with unknown exception");
     }
+}
+
+void llama_maple_level4_compute(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    // Zero-copy is required for this descriptor; do not silently stage on the CPU.
+    GGML_UNUSED(dst); GGML_UNUSED(ith); GGML_UNUSED(nth); GGML_UNUSED(userdata);
+    GGML_ABORT("Maple Level4 node was not claimed by Vulkan; zero-copy unavailable");
+}
+static bool maple_external_execute(ggml_tensor * dst, void * userdata, ggml_vk_external_lease * lease, const ggml_vk_external_api * api) {
+    try { std::fprintf(stderr, "maple-level4 Vulkan executor node=%s CPU_callback=0\n", dst->name); maple_compute(dst, userdata, lease, api); return true; }
+    catch (const std::exception & e) { std::fprintf(stderr, "Maple zero-copy failed: %s\n", e.what()); return false; }
+}
+void llama_maple_level4_register() {
+    auto reg = ggml_backend_reg_by_name("Vulkan");
+    require(reg != nullptr, "Maple zero-copy needs Vulkan backend");
+    auto install = reinterpret_cast<ggml_vk_external_register>(ggml_backend_reg_get_proc_address(reg, "ggml_vk_external_register_v1"));
+    require(install && install(llama_maple_level4_compute, maple_external_execute, 1), "Vulkan lacks the Level4 external executor ABI");
 }

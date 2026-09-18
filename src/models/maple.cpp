@@ -113,6 +113,7 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
             }
         }
     }
+    if (level4) llama_maple_level4_register();
     auto make_island = [&](ggml_tensor * residual, ggml_tensor * attention, int current, int next) {
         auto data = std::make_shared<llama_maple_level4_params>();
         data->hidden = n_embd;
@@ -143,19 +144,19 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
             data->v = l.wv;
             data->next_attn_norm = l.attn_norm;
         }
-        ggml_tensor * args[] = {ggml_cont(ctx0, residual), attention ? ggml_cont(ctx0, attention) : nullptr};
+        ggml_tensor * args[] = {ggml_is_contiguous(residual) ? residual : ggml_cont(ctx0, residual),
+            attention && !ggml_is_contiguous(attention) ? ggml_cont(ctx0, attention) : attention};
         const int64_t width = n_embd + (next >= 0 ? data->q_width + 2*data->kv_width : 0);
         auto * out = ggml_custom_4d(ctx0, GGML_TYPE_F32, width, residual->ne[1], 1, 1,
                 args, attention ? 2 : 1, llama_maple_level4_compute, 1, data.get());
         res->custom_node_data.push_back(data);
-        // The CPU scheduler owns host transfers; the callback executes SYCL XMX.
-        ggml_backend_sched_set_tensor_backend(sched, out, backend_cpu);
+        // The registered Vulkan executor owns the Level4 node before scheduling.
         cb(out, next < 0 ? "maple_l4_terminal" : current < 0 ? "maple_l4_bootstrap" : "maple_l4_advance", current);
         return out;
     };
     if (level4) {
         island = make_island(inpL, nullptr, -1, 0);
-        inpL = ggml_view_2d(ctx0, island, n_embd, n_tokens, island->nb[1], 0);
+        inpL = ggml_view_2d(ctx0, island, n_embd, n_tokens, n_embd * sizeof(float), 0);
     }
 #endif
 
@@ -172,15 +173,15 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
             ggml_tensor * Qcur, * Kcur, * Vcur;
 #ifdef LLAMA_MAPLE_LEVEL4
             if (level4) {
-                const size_t qoff = n_embd * sizeof(float);
-                const size_t koff = qoff + n_embd_head * n_head * sizeof(float);
-                const size_t voff = koff + n_embd_head * n_head_kv * sizeof(float);
+                const size_t qoff = n_embd * n_tokens * sizeof(float);
+                const size_t koff = qoff + n_embd_head * n_head * n_tokens * sizeof(float);
+                const size_t voff = koff + n_embd_head * n_head_kv * n_tokens * sizeof(float);
                 Qcur = ggml_view_3d(ctx0, island, n_embd_head, n_head, n_tokens,
-                        n_embd_head * sizeof(float), island->nb[1], qoff);
+                        n_embd_head * sizeof(float), n_embd_head * n_head * sizeof(float), qoff);
                 Kcur = ggml_view_3d(ctx0, island, n_embd_head, n_head_kv, n_tokens,
-                        n_embd_head * sizeof(float), island->nb[1], koff);
+                        n_embd_head * sizeof(float), n_embd_head * n_head_kv * sizeof(float), koff);
                 Vcur = ggml_view_3d(ctx0, island, n_embd_head, n_head_kv, n_tokens,
-                        n_embd_head * sizeof(float), island->nb[1], voff);
+                        n_embd_head * sizeof(float), n_embd_head * n_head_kv * sizeof(float), voff);
             } else
 #endif
             {
@@ -222,7 +223,7 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
         if (level4) {
             const int next = il + 1 < n_layer ? il + 1 : -1;
             island = make_island(inpSA, cur, il, next);
-            inpL = ggml_view_2d(ctx0, island, n_embd, island->ne[1], island->nb[1], 0);
+            inpL = ggml_view_2d(ctx0, island, n_embd, island->ne[1], n_embd * sizeof(float), 0);
             cb(inpL, "l_out", il);
             continue;
         }

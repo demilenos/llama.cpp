@@ -1,0 +1,170 @@
+{
+  "format": 1,
+  "title": "Level4 Windows Vulkan/LevelZero zero-copy v1",
+  "patch_base": "XMX v0.4 Vulkan-port-v1 + Level4-upgrade-v1 module",
+  "files": [
+    {
+      "path": "README.ZERO_COPY.ko.md",
+      "old_sha256": null,
+      "new_sha256": "724b88b384d0c9757163e1db0ffcd80287a1b087bd20a60d3e91afd3c0994cc5",
+      "bytes": 7514
+    },
+    {
+      "path": "build_level4_zero_copy.cmd",
+      "old_sha256": null,
+      "new_sha256": "20f71f0596bb26269ce729c653eb77096998dd3464c1baf3838b510f6373e23b",
+      "bytes": 634
+    },
+    {
+      "path": "cmake/level4.cmake",
+      "old_sha256": "1356a7ef2783328cb934a35e16442d2bd8b566117c13a0c58b266ce08e69837d",
+      "new_sha256": "5dffd967f5e8bc9d02da68b208f6c0d0f68d48c67028046980bd18dcd4afdf51",
+      "bytes": 1658
+    },
+    {
+      "path": "cmake/level4_zerocopy.cmake",
+      "old_sha256": null,
+      "new_sha256": "dc97adb114ab7334dca1e537f4990f195834b87a3bbce4d339633c71a2a46e78",
+      "bytes": 2782
+    },
+    {
+      "path": "docs/LEVEL4_ZERO_COPY_INTEGRATION.ko.md",
+      "old_sha256": null,
+      "new_sha256": "e30a0f36b45e9e5b2561388b85792e32b91dde79e2da986748274628b60dac1e",
+      "bytes": 10836
+    },
+    {
+      "path": "include/level4_contract.hpp",
+      "old_sha256": "5b96f0839ca19f37aa5749332d5451d82db7a2ce6d4f83ac438ae3488c42156b",
+      "new_sha256": "70464328e3155735422e06d6ad6b7ed1840afb58797a2be6eb81013d79722c90",
+      "bytes": 10880
+    },
+    {
+      "path": "include/level4_zerocopy_contract.hpp",
+      "old_sha256": null,
+      "new_sha256": "d2bc07d5133ee78ff5392c13d70f982bb3d9e65ebf4aa16b2a2abbee5a3b8a78",
+      "bytes": 3111
+    },
+    {
+      "path": "include/maple_level4.hpp",
+      "old_sha256": "e9bb50c2ce31e7e731111d57084bffa644cc93685dbfe7f464c6dcc00bf47c35",
+      "new_sha256": "f3c5005dc82a13da7854381ce7b1c3e64780ab4317f6b6318d4712aeff7a1c28",
+      "bytes": 3718
+    },
+    {
+      "path": "integration/ggml_level4_zerocopy.hpp",
+      "old_sha256": null,
+      "new_sha256": "093841cb699b7694bf29bc8ea442471f8f158b7bdf2c8d9a80a5c2a98751ffc1",
+      "bytes": 1514
+    },
+    {
+      "path": "integration/level4_zerocopy_win32.cpp",
+      "old_sha256": null,
+      "new_sha256": "6d433df3e66f42c1414a5dab172f91010ac899c28d906863751ee027c6f0157e",
+      "bytes": 24198
+    },
+    {
+      "path": "integration/level4_zerocopy_win32.hpp",
+      "old_sha256": null,
+      "new_sha256": "a36ceb09790ae122421be050884714da525320889735fe91de11cb0ff3322cdf",
+      "bytes": 4668
+    },
+    {
+      "path": "scripts/build_level4_zero_copy.ps1",
+      "old_sha256": null,
+      "new_sha256": "814d54b910cb24a5e5a436a59fb0420b7f4c52ac3a994fb0f47e21f38ffaf74e",
+      "bytes": 4465
+    },
+    {
+      "path": "src/maple_level4.cpp",
+      "old_sha256": "b11ba1fec65a6f349e9f59634f44ceb1b51a229350e2bc02468fdb2512ca6cca",
+      "new_sha256": "f7302202242124b3d3bcc67505d8bc27cbd9e9f73c414741d4a29ab9650cc942",
+      "bytes": 23246
+    },
+    {
+      "path": "tests/level4_cpu_stubs.hpp",
+      "old_sha256": null,
+      "new_sha256": "1e979f7618b730df59473f43f7d38f3dc50bb15c45e860e4c374106b07861c22",
+      "bytes": 4018
+    },
+    {
+      "path": "tests/level4_host_tests.cpp",
+      "old_sha256": "b2128bc7386a32ae8fdce46fab0bf6706c934e5e8c729164a8b70142064df9aa",
+      "new_sha256": "36734d056d384276a719ed5781ce6a5a1101c68a18b0b6e9faeffb95391e3d49",
+      "bytes": 8843
+    },
+    {
+      "path": "tests/level4_mock/sycl/sycl.hpp",
+      "old_sha256": "cea73dd167508828cacd4ed90796950f2861e150d7bae0d82dc9b7485a07d5d2",
+      "new_sha256": "d2dca90c3b72584a8130921e8c1e5147356a7af8ee8bec59fffc4c050fb7e6c4",
+      "bytes": 4785
+    },
+    {
+      "path": "tests/level4_zerocopy_contract_tests.cpp",
+      "old_sha256": null,
+      "new_sha256": "b99d225ae8f61e5cc29ed407fea08eb1316132be6348f99c1a34ca3795a5c575",
+      "bytes": 1769
+    },
+    {
+      "path": "tests/level4_zerocopy_native_tests.cpp",
+      "old_sha256": null,
+      "new_sha256": "d2d0edb8599ff212cf672089e78d76fe89e98b76db86ce9da6a493321c5ccb18",
+      "bytes": 14571
+    },
+    {
+      "path": "tests/test_level4_zero_copy_tools.py",
+      "old_sha256": null,
+      "new_sha256": "04208e5e4f01c6d5285763250a234de2ad518accf4d1ecb0060a944cc402fe82",
+      "bytes": 5273
+    },
+    {
+      "path": "tests/zerocopy_mock/ggml.h",
+      "old_sha256": null,
+      "new_sha256": "bfbc60e8f1437ee3011a16444d5c73ae3a76efac9f98d42580fd1ac069f279e3",
+      "bytes": 389
+    },
+    {
+      "path": "tests/zerocopy_mock/level_zero/ze_api.h",
+      "old_sha256": null,
+      "new_sha256": "e8e4204cb411c86bf705a8e10b495445cb0d4e4db21c12811b772b1f2ff92699",
+      "bytes": 2154
+    },
+    {
+      "path": "tests/zerocopy_mock/sycl/ext/oneapi/backend/level_zero.hpp",
+      "old_sha256": null,
+      "new_sha256": "c660d94d4b5ac973fc47e95b30bf7c967a983e109d6c248cd29edd32251169fd",
+      "bytes": 298
+    },
+    {
+      "path": "tests/zerocopy_mock/vulkan/vulkan.h",
+      "old_sha256": null,
+      "new_sha256": "45ff24bd857ec0fb1752983d58fcf305598215a13f40b491ce628bea1c99bc94",
+      "bytes": 10214
+    },
+    {
+      "path": "tests/zerocopy_mock/windows.h",
+      "old_sha256": null,
+      "new_sha256": "8de0dbe665ddcda8d97f6a23051f996fcd8718d7cd4c3db04f3aeaa03e87f391",
+      "bytes": 288
+    },
+    {
+      "path": "tools/analyze_level4_zero_copy.py",
+      "old_sha256": null,
+      "new_sha256": "218e4aad2de8cfda2aa7a33c33a632274b36a6004c2d6c70dd78a5cb65c4c6af",
+      "bytes": 4564
+    },
+    {
+      "path": "tools/apply_level4_zero_copy.py",
+      "old_sha256": null,
+      "new_sha256": "90092e22810145fe003e9d4a9b6322d33c74185b25f02d80d5cb710b8b75294f",
+      "bytes": 5504
+    },
+    {
+      "path": "tools/level4_zerocopy_probe.cpp",
+      "old_sha256": null,
+      "new_sha256": "ec672385dae6d4ed6d60a01bbf1b286c7e846f88f86163cc9fc4486a22de78a1",
+      "bytes": 17922
+    }
+  ],
+  "scope": "Native implementation; CPU/mock validation only. Graph recognizer/skip hooks remain in caller. Metadata manifest and raw validation logs are not payload entries."
+}

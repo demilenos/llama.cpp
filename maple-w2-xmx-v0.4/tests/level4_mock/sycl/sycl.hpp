@@ -19,7 +19,7 @@ namespace sycl {
 namespace info {namespace device {struct name{};struct vendor_id{};struct driver_version{};}enum class device_type{gpu};namespace event_profiling{struct command_start{};struct command_end{};}}
 namespace property {namespace queue {struct in_order{};struct enable_profiling{};}}
 enum class backend{ext_oneapi_level_zero};
-struct context{};
+struct context;
 using exception_list=std::vector<std::exception_ptr>;
 struct property_list {bool ordered=false;template<class... P>property_list(P...){ordered=(std::is_same_v<P,property::queue::in_order>||...);}};
 enum class aspect {fp16};
@@ -30,7 +30,9 @@ struct device {
     backend get_backend()const{return backend::ext_oneapi_level_zero;}
     bool is_gpu()const{return true;}bool has(aspect)const{return true;}
     bool operator==(const device&)const{return true;}
+    bool operator!=(const device&other)const{return !(*this==other);}
 };
+struct context {context()=default;explicit context(device){} std::vector<device>get_devices()const{return {device{}};}};
 struct platform {static std::vector<platform>get_platforms(){return {platform{}};}std::vector<device>get_devices(info::device_type)const{return {device{}};}};
 inline int mock_waits=0;
 inline bool mock_execute=false;

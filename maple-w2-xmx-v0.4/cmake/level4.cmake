@@ -19,3 +19,6 @@ if(MAPLE_BUILD_SYCL OR TARGET maple-w2-xmx)
     target_link_libraries(maple-level4-probe PRIVATE maple-level4)
     target_compile_options(maple-level4-probe PRIVATE ${MAPLE_PRECISE_FLAGS})
 endif()
+
+# Optional Level4 zero-copy transport
+include("${CMAKE_CURRENT_LIST_DIR}/level4_zerocopy.cmake")

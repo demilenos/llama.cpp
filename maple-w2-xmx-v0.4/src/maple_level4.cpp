@@ -12,7 +12,7 @@ constexpr uint32_t WG=1;
 #else
 constexpr uint32_t WG=64;
 #endif
-class PackInput;class PackOutput;class InitStatus;class ResidualNorm;
+class PackInput;class PackOutput;class PoisonDirectOutputs;class InitStatus;class ResidualNorm;
 class RouterLogits;class RouterSelect;class FinalStatus;class CopyBootstrap;
 A8Workspace aq(const Workspace&w,const char*n){return w.a8(n);}
 ExpertTokenTileView tiles(const Workspace&w,const char*n,uint32_t t) {
@@ -47,7 +47,7 @@ MoeWorkspace Workspace::moe()const {
 Workspace bind_workspace(void*p,size_t n,Plan plan) {
     if(!p||(reinterpret_cast<uintptr_t>(p)&63)||n<plan.bytes)throw std::invalid_argument("Level4 arena needs 64-byte alignment and plan.bytes capacity");
     // Reconstruct to reject caller-edited region offsets before any pointer is formed.
-    const auto canonical=make_plan(plan.config,plan.gate_split,plan.down_split,plan.o_split,plan.qkv_split,plan.gate_tile,plan.down_tile);
+    const auto canonical=make_plan(plan.config,plan.gate_split,plan.down_split,plan.o_split,plan.qkv_split,plan.gate_tile,plan.down_tile,plan.direct_boundary);
     if(canonical.bytes!=plan.bytes||canonical.spans.size()!=plan.spans.size())throw std::invalid_argument("noncanonical Level4 plan");
     for(const auto&kv:canonical.spans){const auto&s=plan.at(kv.first);if(s.offset!=kv.second.offset||s.count!=kv.second.count||s.element_bytes!=kv.second.element_bytes)throw std::invalid_argument("modified Level4 plan");}
     return {static_cast<uint8_t*>(p),n,std::move(plan)};
@@ -59,6 +59,11 @@ uint64_t Run::add(const char*n,const sycl::event&e,uint64_t parents) {
 }
 void validate(const Weights&wt,const Bindings&b,const Options&o,const Workspace&w) {
     const auto&c=w.plan.config;check_config(c);
+    if(o.boundary!=BoundaryPolicy::packed&&o.boundary!=BoundaryPolicy::direct_required)
+        throw std::invalid_argument("unknown boundary policy");
+    const bool direct=o.boundary==BoundaryPolicy::direct_required;
+    if(w.plan.direct_boundary&&!direct)
+        throw std::invalid_argument("copy-free plan cannot use packed boundaries");
     if(c.entry==Entry::advance && (wt.current_layer<0||wt.current_layer==INT32_MAX||wt.next_layer!=wt.current_layer+1))
         throw std::invalid_argument("advance needs O/FFN layer L and norm/QKV layer L+1");
     if(c.entry==Entry::bootstrap && (wt.current_layer!=-1||wt.next_layer<0))
@@ -99,6 +104,18 @@ void validate(const Weights&wt,const Bindings&b,const Options&o,const Workspace&
         readonly.push_back(addr(wt.q,nbytes({c.hidden,c.q_width,1})));
         readonly.push_back(addr(wt.k,nbytes({c.hidden,c.kv_width,1})));readonly.push_back(addr(wt.v,nbytes({c.hidden,c.kv_width,1})));
         readonly.push_back(addr(wt.next_attn_norm,size_t(c.hidden)*4));
+    }
+    if(direct) {
+        if(!token_contiguous(b.residual,c.tokens,c.hidden) ||
+           (has_post(c.entry)&&!token_contiguous(b.attention,c.tokens,c.attention)))
+            throw std::invalid_argument("zero-copy input is not token-contiguous F32; no silent repack");
+        for(const auto&v:output_views)if(!token_contiguous(v.first,c.tokens,v.second))
+            throw std::invalid_argument("zero-copy output is not token-contiguous F32; no silent scatter");
+        // The old packed path reads every input before writing outputs. Direct
+        // kernels write earlier: require ping-pong residual storage, not aliases.
+        const size_t inputs=has_post(c.entry)?2:1;
+        for(size_t i=0;i<inputs;++i)for(const auto&out:outputs)
+            if(overlaps(readonly[i],out))throw std::invalid_argument("direct boundary needs disjoint inputs/outputs");
     }
     const auto arena=addr(w.base,w.plan.bytes);
     for(size_t i=0;i<outputs.size();++i){if(overlaps(outputs[i],arena))throw std::invalid_argument("output aliases Level4 scratch");
@@ -150,6 +167,13 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
     validate(wt,b,o,w);validate_dg2_device(q.get_device());const auto c=w.plan.config;Run r;r.status=w.get<int32_t>("status");
     auto events=[&](uint64_t bits){std::vector<sycl::event>v;if(!bits)return deps;for(size_t i=0;i<r.count;++i)if((bits>>i)&1u)v.push_back(r.stages[i].event);return v;};
     auto add=[&](const char*n,sycl::event e,uint64_t p=0){auto bit=r.add(n,e,p);if(o.diagnostic_stage_waits)e.wait_and_throw();return bit;};
+    const bool direct=o.boundary==BoundaryPolicy::direct_required;
+    const float* residual=direct?b.residual.data:w.get<float>("residual");
+    const float* attention=has_post(c.entry)?(direct?b.attention.data:w.get<float>("attention")):nullptr;
+    float* hidden_out=direct?b.hidden.data:w.get<float>("hidden_out");
+    float* q_out=has_qkv(c.entry)?(direct?b.q.data:w.get<float>("q")):nullptr;
+    float* k_out=has_qkv(c.entry)?(direct?b.k.data:w.get<float>("k")):nullptr;
+    float* v_out=has_qkv(c.entry)?(direct?b.v.data:w.get<float>("v")):nullptr;
     const size_t jobs=size_t(c.tokens)*c.topk;
     auto zero=w.get<int32_t>("ids_zero"),stat=r.status,nb=w.get<int32_t>("norm_bad"),nx=w.get<int32_t>("next_bad"),rb=w.get<int32_t>("router_bad");
     auto so=w.get<int32_t>("dense_o_status"),sq=w.get<int32_t>("dense_q_status"),skv=w.get<int32_t>("dense_kv_status");
@@ -157,7 +181,9 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
     auto init=q.submit([&](sycl::handler&h){h.depends_on(deps);h.parallel_for<InitStatus>(sycl::range<1>(jobs),[=](sycl::id<1>ii){size_t i=ii[0];if(i<c.tokens){zero[i]=0;stat[i]=0;nb[i]=0;nx[i]=0;rb[i]=0;so[i]=0;sq[i]=0;skv[i]=0;}if(sg){sg[i]=0;sd[i]=0;}});});
     const uint64_t ib=add("init_status",init);
     auto pack=[&](const char*name,ReadView view,float*out,uint32_t width){auto ev=q.submit([&](sycl::handler&h){h.depends_on(deps);h.parallel_for<PackInput>(sycl::range<1>(size_t(c.tokens)*width),[=](sycl::id<1>ii){size_t i=ii[0];out[i]=view.data[offset(view,i/width,i%width)];});});return add(name,ev);};
-    const uint64_t rp=pack("pack_residual",b.residual,w.get<float>("residual"),c.hidden);
+    const uint64_t rp=direct?ib:pack("pack_residual",b.residual,w.get<float>("residual"),c.hidden);
+    if(direct)r.boundary_traffic.direct_inputs=has_post(c.entry)?2:1;
+    else r.boundary_traffic.input_pack_bytes=size_t(c.tokens)*c.hidden*sizeof(float);
     // Reuse the unmodified v0.4 dense-compatible topk=1 primitive. Q and K/V have
     // different output widths; pair K+V, never pretend Q/K shapes are equal.
     auto project=[&](const char*main_name,const char*reduce_name,const uint8_t*w0,const uint8_t*w1,const float*x,float*y0,float*y1,
@@ -168,10 +194,11 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
     };
     uint64_t post=rp|ib;MoeWorkspace mw{};
     if(has_post(c.entry)) {
-        auto ap=pack("pack_fa_pre_o",b.attention,w.get<float>("attention"),c.attention);uint64_t oa=ap|ib;
-        auto ow=aq(w,"o_a8");if(o.o_precision==DensePrecision::a8){auto e=enqueue_a8_quant(q,w.get<float>("attention"),ActivationType::f32,c.tokens,c.attention,32,ow,events(oa));oa=add("o_input_quant",e,oa);}
-        auto op=project("o_projection","o_reduce",wt.o,nullptr,w.get<float>("attention"),w.get<float>("o"),nullptr,c.attention,c.hidden,so,o.o_precision,o.o_kernel,ow,w.get<float>("o_split"),oa);
-        auto ff=enqueue_residual_norm(q,w.get<float>("residual"),w.get<float>("o"),wt.ffn_norm,w.get<float>("ff_residual"),w.get<float>("ff_norm"),nb,c.tokens,c.hidden,c.ffn_epsilon,events(op|rp));
+        auto ap=direct?ib:pack("pack_fa_pre_o",b.attention,w.get<float>("attention"),c.attention);uint64_t oa=ap|ib;
+        if(!direct)r.boundary_traffic.input_pack_bytes+=size_t(c.tokens)*c.attention*sizeof(float);
+        auto ow=aq(w,"o_a8");if(o.o_precision==DensePrecision::a8){auto e=enqueue_a8_quant(q,attention,ActivationType::f32,c.tokens,c.attention,32,ow,events(oa));oa=add("o_input_quant",e,oa);}
+        auto op=project("o_projection","o_reduce",wt.o,nullptr,attention,w.get<float>("o"),nullptr,c.attention,c.hidden,so,o.o_precision,o.o_kernel,ow,w.get<float>("o_split"),oa);
+        auto ff=enqueue_residual_norm(q,residual,w.get<float>("o"),wt.ffn_norm,w.get<float>("ff_residual"),w.get<float>("ff_norm"),nb,c.tokens,c.hidden,c.ffn_epsilon,events(op|rp));
         auto fb=add("residual_ffn_norm",ff,op|rp);
         auto logits=enqueue_router_logits(q,w.get<float>("ff_norm"),wt.router,w.get<float>("router_logits"),c.tokens,c.hidden,c.experts,events(fb));auto lb=add("router_logits_f32",logits,fb);
         auto sel=enqueue_router_select(q,w.get<float>("router_logits"),w.get<int32_t>("ids"),w.get<float>("routes"),rb,c.tokens,c.experts,c.topk,events(lb));auto sb=add("router_topk",sel,lb);
@@ -180,18 +207,18 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
         for(size_t j=0;j<mr.count;++j){uint64_t parent=mr.stages[j].parents?(uint64_t(mr.stages[j].parents)<<start):(sb|ib);add(mr.stages[j].label,mr.stages[j].event,parent);}
         const uint64_t mb=uint64_t(1)<<(r.count-1);
         auto e=enqueue_residual_norm(q,w.get<float>("ff_residual"),w.get<float>("moe_out"),has_qkv(c.entry)?wt.next_attn_norm:nullptr,
-            w.get<float>("hidden_out"),has_qkv(c.entry)?w.get<float>("next_norm"):nullptr,nx,c.tokens,c.hidden,c.next_epsilon,events(mb));
+            hidden_out,has_qkv(c.entry)?w.get<float>("next_norm"):nullptr,nx,c.tokens,c.hidden,c.next_epsilon,events(mb));
         post=add(has_qkv(c.entry)?"residual_next_attn_norm":"residual_terminal",e,mb);
     } else {
-        auto e=enqueue_residual_norm(q,w.get<float>("residual"),nullptr,wt.next_attn_norm,w.get<float>("hidden_out"),w.get<float>("next_norm"),nx,c.tokens,c.hidden,c.next_epsilon,events(rp|ib));
+        auto e=enqueue_residual_norm(q,residual,nullptr,wt.next_attn_norm,hidden_out,w.get<float>("next_norm"),nx,c.tokens,c.hidden,c.next_epsilon,events(rp|ib));
         post=add("bootstrap_attn_norm",e,rp|ib);
     }
     uint64_t done=post;
     if(has_qkv(c.entry)) {
         auto a=aq(w,"qkv_a8");uint64_t p=post;
         if(o.qkv_precision==DensePrecision::a8){auto e=enqueue_a8_quant(q,w.get<float>("next_norm"),ActivationType::f32,c.tokens,c.hidden,32,a,events(p));p=add("qkv_input_quant_once",e,p);}
-        auto qp=project("q_projection","q_reduce",wt.q,nullptr,w.get<float>("next_norm"),w.get<float>("q"),nullptr,c.hidden,c.q_width,sq,o.qkv_precision,o.qkv_kernel,a,w.get<float>("q_split"),p|ib);
-        auto kvp=project("kv_pair_projection","kv_reduce",wt.k,wt.v,w.get<float>("next_norm"),w.get<float>("k"),w.get<float>("v"),c.hidden,c.kv_width,skv,o.qkv_precision,o.qkv_kernel,a,w.get<float>("kv_split"),p|ib);
+        auto qp=project("q_projection","q_reduce",wt.q,nullptr,w.get<float>("next_norm"),q_out,nullptr,c.hidden,c.q_width,sq,o.qkv_precision,o.qkv_kernel,a,w.get<float>("q_split"),p|ib);
+        auto kvp=project("kv_pair_projection","kv_reduce",wt.k,wt.v,w.get<float>("next_norm"),k_out,v_out,c.hidden,c.kv_width,skv,o.qkv_precision,o.qkv_kernel,a,w.get<float>("kv_split"),p|ib);
         done=qp|kvp;
     }
     // Final per-token status merges quantizer and MoE device flags without host readback.
@@ -199,7 +226,7 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
     const auto qi=has_qkv(c.entry)&&o.qkv_precision==DensePrecision::a8?aq(w,"qkv_a8").invalid:nullptr;
     const auto mi=has_post(c.entry)?mw.input_a8.invalid:nullptr,hi=has_post(c.entry)?mw.hidden_a8.invalid:nullptr;
     const auto hv=has_post(c.entry)?mw.hidden_invalid:nullptr,ov=has_post(c.entry)?mw.output_invalid:nullptr;
-    const float* hx=w.get<float>("hidden_out"),*qv=has_qkv(c.entry)?w.get<float>("q"):nullptr,*kv=has_qkv(c.entry)?w.get<float>("k"):nullptr,*vv=has_qkv(c.entry)?w.get<float>("v"):nullptr;
+    const float* hx=hidden_out,*qv=q_out,*kv=k_out,*vv=v_out;
     auto status_event=q.submit([&](sycl::handler&h){h.depends_on(events(done));h.parallel_for<FinalStatus>(sycl::range<1>(c.tokens),[=](sycl::id<1>ii){size_t t=ii[0];int v=nb[t]|nx[t]|rb[t]|so[t]|sq[t]|skv[t];
         if(oi)for(uint32_t j=0;j<c.attention/32;++j)v|=oi[t*(c.attention/32)+j];
         if(qi)for(uint32_t j=0;j<c.hidden/32;++j)v|=qi[t*(c.hidden/32)+j];
@@ -211,6 +238,22 @@ Run enqueue(sycl::queue&q,const Weights&wt,const Bindings&b,const Options&o,cons
         stat[t]=v;
     });});auto st=add("island_status",status_event,done);
     const size_t row_width=size_t(c.hidden)+(has_qkv(c.entry)?size_t(c.q_width)+2ull*c.kv_width:0);
+    if(direct) {
+        // No export/copy kernel. Invalid tokens still poison their external outputs
+        // before Vulkan sees them, preserving the old error contract.
+        auto poison=q.submit([&](sycl::handler&h){h.depends_on(status_event);h.parallel_for<PoisonDirectOutputs>(sycl::range<1>(size_t(c.tokens)*row_width),[=](sycl::id<1>ii){
+            const size_t t=ii[0]/row_width;size_t col=ii[0]%row_width;
+            if(!stat[t])return;
+            const float nan=std::numeric_limits<float>::quiet_NaN();
+            if(col<c.hidden)hidden_out[t*c.hidden+col]=nan;
+            else if((col-=c.hidden)<c.q_width)q_out[t*c.q_width+col]=nan;
+            else if((col-=c.q_width)<c.kv_width)k_out[t*c.kv_width+col]=nan;
+            else {col-=c.kv_width;v_out[t*c.kv_width+col]=nan;}
+        });});
+        r.boundary_traffic.direct_outputs=has_qkv(c.entry)?4:1;
+        add("direct_output_status",poison,st);return r;
+    }
+    r.boundary_traffic.output_pack_bytes=size_t(c.tokens)*row_width*sizeof(float);
     auto output=q.submit([&](sycl::handler&h){h.depends_on(status_event);h.parallel_for<PackOutput>(sycl::range<1>(size_t(c.tokens)*row_width),[=](sycl::id<1>ii){size_t t=ii[0]/row_width,col=ii[0]%row_width;float value;WriteView out;size_t oc=col;
         if(col<c.hidden){value=hx[t*c.hidden+col];out=b.hidden;}
         else if((col-=c.hidden)<c.q_width){value=qv[t*c.q_width+col];out=b.q;oc=col;}

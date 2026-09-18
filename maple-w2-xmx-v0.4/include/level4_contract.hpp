@@ -9,6 +9,9 @@ namespace maple_w2::level4 {
 // This is an attention-to-attention island, NOT a complete SYCL model backend.
 enum class Entry { bootstrap, advance, terminal };
 enum class DensePrecision { a16, a8 };
+// Strict means no boundary repack/copy on the GPU either. Unsupported strides
+// are rejected BEFORE submitting anything; never silently fall back to a copy.
+enum class BoundaryPolicy { packed, direct_required };
 struct Config {
     uint32_t tokens=1, hidden=2048, attention=2048, q_width=2048, kv_width=512;
     uint32_t ffn=512, experts=256, topk=8;
@@ -103,10 +106,16 @@ inline bool disjoint_token_slices(const WriteView&a,uint32_t aw,const WriteView&
     size_t gap=(bp-ap)/sizeof(float);
     return gap>=left && gap<=a.token_stride && right<=a.token_stride-gap;
 }
+template<class V>inline bool token_contiguous(const V&v,uint32_t tokens,uint32_t width) {
+    (void)required_elements(v,tokens,width);
+    return v.lane_stride==1 && (width==v.head_dim||v.head_stride==v.head_dim) &&
+           (tokens==1||v.token_stride==width);
+}
 struct Span {size_t offset=0,count=0,element_bytes=0;size_t bytes()const{return checked_mul(count,element_bytes);} };
 struct Plan {
     Config config;std::map<std::string,Span> spans;size_t bytes=0;
     uint32_t gate_split=1,down_split=1,o_split=1,qkv_split=1,gate_tile=1,down_tile=1;
+    bool direct_boundary=false;
     void add(const std::string&n,size_t count,size_t size) {
         bytes=aligned(bytes);if(!spans.emplace(n,Span{bytes,count,size}).second)throw std::logic_error("duplicate region");
         bytes=plus_size(bytes,checked_mul(count,size));
@@ -117,17 +126,17 @@ inline void check_split(uint32_t k,uint32_t s) {
     if((s!=1&&s!=2&&s!=4&&s!=8)||(k/256)%s)throw std::invalid_argument("invalid Level4 split-K");
 }
 inline Plan make_plan(Config c,uint32_t gs=1,uint32_t ds=1,uint32_t os=1,uint32_t qs=1,
-                      uint32_t gt=1,uint32_t dt=1) {
+                      uint32_t gt=1,uint32_t dt=1,bool direct_boundary=false) {
     check_config(c);check_split(c.hidden,gs);check_split(c.ffn,ds);check_split(c.attention,os);check_split(c.hidden,qs);
     check_tokens_per_tile(gt);check_tokens_per_tile(dt);
-    Plan p{c,{},0,gs,ds,os,qs,gt,dt};
+    Plan p{c,{},0,gs,ds,os,qs,gt,dt,direct_boundary};
     const size_t q=c.tokens, x=checked_mul(q,c.hidden),jobs=checked_mul(q,c.topk),h=checked_mul(jobs,c.ffn),d=checked_mul(jobs,c.hidden);
     auto f=[&](const char*n,size_t count){p.add(n,count,4);};
     auto a8=[&](const std::string&n,size_t count){p.add(n+".q",count,1);p.add(n+".scales",count/32,4);p.add(n+".invalid",count/32,4);};
-    f("residual",x);f("ids_zero",q);f("status",q);f("norm_bad",q);f("next_bad",q);f("router_bad",q);
+    f("residual",direct_boundary?0:x);f("ids_zero",q);f("status",q);f("norm_bad",q);f("next_bad",q);f("router_bad",q);
     f("dense_o_status",q);f("dense_q_status",q);f("dense_kv_status",q);
     if(has_post(c.entry)) {
-        f("attention",checked_mul(q,c.attention));f("o",x);f("ff_residual",x);f("ff_norm",x);f("moe_out",x);
+        f("attention",direct_boundary?0:checked_mul(q,c.attention));f("o",x);f("ff_residual",x);f("ff_norm",x);f("moe_out",x);
         f("router_logits",checked_mul(q,c.experts));f("routes",jobs);f("ids",jobs);
         f("gate",h);f("up",h);f("hidden",h);f("down",d);f("gate_status",jobs);f("down_status",jobs);
         f("hidden_invalid",h);f("output_invalid",x);
@@ -145,11 +154,11 @@ inline Plan make_plan(Config c,uint32_t gs=1,uint32_t ds=1,uint32_t os=1,uint32_
         }
     }
     if(has_qkv(c.entry)) {
-        f("next_norm",x);f("q",checked_mul(q,c.q_width));f("k",checked_mul(q,c.kv_width));f("v",checked_mul(q,c.kv_width));
+        f("next_norm",x);f("q",direct_boundary?0:checked_mul(q,c.q_width));f("k",direct_boundary?0:checked_mul(q,c.kv_width));f("v",direct_boundary?0:checked_mul(q,c.kv_width));
         f("q_split",qs>1?checked_mul(checked_mul(q,c.q_width),qs):0);
         f("kv_split",qs>1?checked_mul(checked_mul(checked_mul(q,c.kv_width),qs),2):0);a8("qkv_a8",x);
     }
-    f("hidden_out",x);p.bytes=aligned(p.bytes);return p;
+    f("hidden_out",direct_boundary?0:x);p.bytes=aligned(p.bytes);return p;
 }
 // FP32 full softmax then top-k renormalization, deterministic lower-ID ties.
 // Not a promise of ggml bitwise router parity: compare route IDs during integration.

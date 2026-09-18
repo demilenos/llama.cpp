@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <memory>
 
-// Graph-owned state for the host-staged Maple Level4 custom node.
+// Graph-owned descriptor for the Vulkan Level4 executor.
 // Weight tensors are model-owned and immutable; boundary tensors are node inputs.
 struct llama_maple_level4_params {
+    uint32_t magic = 0x4d4c345a;
+    uint32_t abi_version = 1;
     ggml_tensor * o = nullptr;
     ggml_tensor * q = nullptr;
     ggml_tensor * k = nullptr;
@@ -32,8 +34,10 @@ struct llama_maple_level4_params {
     int next_layer = -1;
     unsigned token_tile = 1;
 
-    // Opaque graph lifetime cache. It contains host packed weights only.
+    // Graph-owned packed weights and imported allocation leases.
     std::shared_ptr<void> runtime;
 };
 
 void llama_maple_level4_compute(ggml_tensor * dst, int ith, int nth, void * userdata);
+
+void llama_maple_level4_register();

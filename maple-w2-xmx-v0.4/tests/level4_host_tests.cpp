@@ -7,38 +7,7 @@
 #include <set>
 #include <new>
 using namespace maple_w2;namespace l4=maple_w2::level4;
-namespace maple_w2 {
-static sycl::event stub(sycl::queue&q,const std::vector<sycl::event>&d){return q.submit([&](sycl::handler&h){h.depends_on(d);});}
-static std::vector<uint8_t> native(const uint8_t*p,Shape s,Layout l){std::vector<uint8_t>x(p,p+nbytes(s));return l==Layout::s2tile8?unpack_s2tile8(x,s):x;}
-Run enqueue(sycl::queue&q,const DeviceProblem&p,Options o,float*,const std::vector<sycl::event>&d) {
- Run r;r.main=stub(q,d);r.done=r.main;if(o.split_k>1){r.has_reduce=true;r.done=stub(q,{r.main});}
- if(sycl::mock_execute){std::vector<float>x((const float*)p.x,(const float*)p.x+size_t(p.tokens)*p.shape.k);std::vector<int32_t>ids(p.ids,p.ids+size_t(p.tokens)*p.topk);
-  auto a=reference(native(p.w0,p.shape,p.layout),p.shape,x,ids,p.tokens,p.topk,p.per_selection,true);std::copy(a.begin(),a.end(),p.y0);
-  if(p.w1){a=reference(native(p.w1,p.shape,p.layout),p.shape,x,ids,p.tokens,p.topk,p.per_selection,true);std::copy(a.begin(),a.end(),p.y1);}}
- return r;
-}
-sycl::event enqueue_a8_quant(sycl::queue&q,const void*x,ActivationType,uint32_t rows,uint32_t k,uint32_t g,A8Workspace w,const std::vector<sycl::event>&d){
- auto e=stub(q,d);if(sycl::mock_execute){auto a=quantize_a8(std::vector<float>((const float*)x,(const float*)x+size_t(rows)*k),rows,k,g);std::copy(a.q.begin(),a.q.end(),w.q);std::copy(a.scale.begin(),a.scale.end(),w.scales);std::fill(w.invalid,w.invalid+a.scale.size(),0);}return e;
-}
-A8Run enqueue_a8(sycl::queue&q,const DeviceProblem&p,A8Options o,A8Workspace w,float*,const std::vector<sycl::event>&d) {
- A8Run r;r.main=stub(q,d);r.done=r.main;if(o.kernel.split_k>1){r.has_reduce=true;r.done=stub(q,{r.main});}
- if(sycl::mock_execute){size_t rows=size_t(p.tokens)*(p.per_selection?p.topk:1);QuantizedHost a{uint32_t(rows),p.shape.k,o.group,std::vector<int8_t>(w.q,w.q+rows*p.shape.k),std::vector<float>(w.scales,w.scales+rows*p.shape.k/o.group)};
-  std::vector<int32_t>ids(p.ids,p.ids+size_t(p.tokens)*p.topk);auto y=reference_a8(native(p.w0,p.shape,p.layout),p.shape,a,ids,p.tokens,p.topk,p.per_selection);std::copy(y.begin(),y.end(),p.y0);
-  if(p.w1){y=reference_a8(native(p.w1,p.shape,p.layout),p.shape,a,ids,p.tokens,p.topk,p.per_selection);std::copy(y.begin(),y.end(),p.y1);}}
- return r;
-}
-MoeRun enqueue_moe(sycl::queue&q,const MoeProblem&p,const MoeOptions&o,const MoeWorkspace&w,const std::vector<sycl::event>&d) {
- MoeRun r;r.add("CPU_STUB_moe_reference",stub(q,d));
- if(sycl::mock_execute){std::vector<float>x(p.x,p.x+size_t(p.tokens)*p.gate_shape.k);std::vector<int32_t>ids(p.ids,p.ids+size_t(p.tokens)*p.topk);std::vector<float>routes(p.routes,p.routes+ids.size());
-  auto a=quantize_a8(x,p.tokens,p.gate_shape.k,32);std::copy(a.q.begin(),a.q.end(),w.input_a8.q);std::copy(a.scale.begin(),a.scale.end(),w.input_a8.scales);std::fill(w.input_a8.invalid,w.input_a8.invalid+a.scale.size(),0);
-  auto gate=reference_a8(native(p.gate,p.gate_shape,p.layout),p.gate_shape,a,ids,p.tokens,p.topk,false),up=reference_a8(native(p.up,p.gate_shape,p.layout),p.gate_shape,a,ids,p.tokens,p.topk,false);
-  std::copy(gate.begin(),gate.end(),w.gate);std::copy(up.begin(),up.end(),w.up);auto h=swiglu_reference(gate,up,o.clamp);std::copy(h.begin(),h.end(),w.hidden);std::fill(w.hidden_invalid,w.hidden_invalid+h.size(),0);
-  auto aq=quantize_a8(h,uint32_t(ids.size()),p.gate_shape.m,32);std::copy(aq.q.begin(),aq.q.end(),w.hidden_a8.q);std::copy(aq.scale.begin(),aq.scale.end(),w.hidden_a8.scales);std::fill(w.hidden_a8.invalid,w.hidden_a8.invalid+aq.scale.size(),0);
-  Shape ds{p.gate_shape.m,p.gate_shape.k,p.gate_shape.experts};auto down=reference_a8(native(p.down,ds,p.layout),ds,aq,ids,p.tokens,p.topk,true);std::copy(down.begin(),down.end(),w.down);
-  auto y=weighted_sum_reference(down,routes,p.tokens,p.topk,p.gate_shape.k);std::copy(y.begin(),y.end(),p.y);std::fill(w.output_invalid,w.output_invalid+y.size(),0);}
- return r;
-}
-}
+#include "level4_cpu_stubs.hpp"
 static size_t checks=0;void need(bool b){++checks;if(!b)throw std::runtime_error("Level4 host assertion "+std::to_string(checks));}
 static bool path(const sycl::queue&q,int src,int dst){std::vector<int>todo{dst};std::set<int>seen;while(!todo.empty()){int x=todo.back();todo.pop_back();if(x==src)return true;if(x==0||!seen.insert(x).second)continue;for(auto e:q.graph.at(x-1))todo.push_back(e.number);}return false;}
 struct Arena {void*p;size_t n;Arena(size_t sz):p(::operator new(sz,std::align_val_t(64))),n(sz){std::memset(p,0,sz);}~Arena(){::operator delete(p,std::align_val_t(64));}};
@@ -66,6 +35,26 @@ int main()try {
    for(uint32_t t=0;t<tokens;++t)for(uint32_t k=0;k<256;++k)need(qo[l4::offset(b.q,t,k)]==ws.get<float>("q")[size_t(t)*256+k]);}
   if(l4::has_post(mode)){auto norm=std::vector<float>(ws.get<float>("ff_norm"),ws.get<float>("ff_norm")+x.size());auto logits=l4::router_logits_reference(norm,router,256,8);auto actual=std::vector<float>(ws.get<float>("router_logits"),ws.get<float>("router_logits")+tokens*8);need(errors(actual,logits).nmse<1e-10);
    for(uint32_t t=0;t<tokens;++t){int32_t ids[2];float sc[2];l4::route_reference(actual.data()+t*8,8,2,ids,sc);for(unsigned k=0;k<2;++k){need(ws.get<int32_t>("ids")[t*2+k]==ids[k]);need(std::abs(ws.get<float>("routes")[t*2+k]-sc[k])<1e-7f);}}}
+  // Strict zero-copy boundary uses the SAME computation with direct imported-
+  // equivalent pointers. This is scalar host execution, not external-memory proof.
+  {
+    const auto ref_h=ho;std::vector<float>ref_q(qo.size());
+    if(l4::has_qkv(mode))for(uint32_t t=0;t<tokens;++t)for(uint32_t j=0;j<256;++j)ref_q[size_t(t)*256+j]=qo[l4::offset(b.q,t,j)];
+    auto dp=l4::make_plan(c,1,1,1,1,1,1,true);Arena dm(dp.bytes);auto dw=l4::bind_workspace(dm.p,dm.n,dp);
+    need(dp.bytes<plan.bytes);need(dw.get<float>("residual")==nullptr);need(dw.get<float>("hidden_out")==nullptr);
+    auto db=b;db.q=l4::contiguous_write(qo.data(),tokens,256);auto dop=o;dop.boundary=l4::BoundaryPolicy::direct_required;
+    sycl::mock_waits=0;auto direct=l4::enqueue(q,wt,db,dop,dw,{root});need(sycl::mock_waits==0);
+    need(direct.boundary_traffic.bytes()==0);need(direct.boundary_traffic.direct_inputs==(l4::has_post(mode)?2u:1u));
+    need(direct.boundary_traffic.direct_outputs==(l4::has_qkv(mode)?4u:1u));
+    need(ho==ref_h);if(l4::has_qkv(mode))need(qo==ref_q);
+    for(size_t j=0;j<direct.count;++j){std::string name=direct.stages[j].name;need(name.find("pack_")==std::string::npos);need(name!="export_hidden_raw_qkv");need(path(q,root.number,direct.stages[j].event.number));need(path(q,direct.stages[j].event.number,direct.done.number));}
+    auto alias=db;alias.hidden.data=x.data();auto old=q.graph.size();bool threw=false;
+    try{l4::enqueue(q,wt,alias,dop,dw);}catch(...){threw=true;}need(threw&&q.graph.size()==old);
+    if(tokens>1&&l4::has_qkv(mode)){old=q.graph.size();threw=false;try{l4::enqueue(q,wt,b,dop,dw);}catch(...){threw=true;}need(threw&&q.graph.size()==old);}
+    old=q.graph.size();threw=false;try{l4::enqueue(q,wt,db,o,dw);}catch(...){threw=true;}need(threw&&q.graph.size()==old);
+    // Restore packed reference storage for following legacy tests.
+    l4::enqueue(q,wt,b,o,ws);
+  }
   // Interleaved QKV output views overlap in bounding ranges but not in elements.
   if(l4::has_qkv(mode)) {
     std::vector<float> combined(size_t(tokens)*512,-77);auto ib=b;

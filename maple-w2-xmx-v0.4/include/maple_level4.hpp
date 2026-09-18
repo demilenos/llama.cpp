@@ -22,6 +22,7 @@ struct Options {
     // A8 is opt-in for attention projections until model quality is measured.
     DensePrecision o_precision=DensePrecision::a16,qkv_precision=DensePrecision::a16;
     maple_w2::Options o_kernel{},qkv_kernel{};
+    BoundaryPolicy boundary=BoundaryPolicy::packed;
     bool diagnostic_stage_waits=false; // never enabled by default
 };
 struct Workspace {
@@ -36,7 +37,14 @@ struct Workspace {
 Workspace bind_workspace(void* device_arena,size_t capacity,Plan plan);
 void validate(const Weights&,const Bindings&,const Options&,const Workspace&);
 struct Stage {const char* name="";sycl::event event;uint64_t parents=0;};
+struct BoundaryTraffic {
+    uint64_t input_pack_bytes=0,output_pack_bytes=0;
+    uint32_t direct_inputs=0,direct_outputs=0;
+    // These count requested device-to-device boundary copies, not bus counters.
+    uint64_t bytes()const{return input_pack_bytes+output_pack_bytes;}
+};
 struct Run {
+    BoundaryTraffic boundary_traffic{};
     std::array<Stage,56> stages{};size_t count=0;sycl::event done;int32_t* status=nullptr;
     MoeScheduleDecision dispatch{};
     uint64_t add(const char*,const sycl::event&,uint64_t parents=0);

@@ -228,9 +228,10 @@ endif()
 # build the library
 #
 
-option(LLAMA_MAPLE_LEVEL4 "Build experimental host-staged Maple Level 4 XMX islands" OFF)
+option(LLAMA_MAPLE_LEVEL4 "Build Vulkan zero-copy Maple Level 4 XMX islands" OFF)
 if (LLAMA_MAPLE_LEVEL4)
     set(MAPLE_BUILD_SYCL ON CACHE BOOL "Build Maple SYCL kernels" FORCE)
+    set(MAPLE_LEVEL4_ZERO_COPY ON CACHE BOOL "Build Windows Vulkan/Level Zero transport")
     add_subdirectory(maple-w2-xmx-v0.4)
 endif()
 add_subdirectory(src)
