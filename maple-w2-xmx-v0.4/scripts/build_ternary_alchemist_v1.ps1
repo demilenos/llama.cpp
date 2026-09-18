@@ -6,6 +6,7 @@ param(
     [int]$Tile = 0,
     [ValidateSet(4, 8, 16, 32)]
     [int]$LocalSize = 8,
+    [switch]$Validate,
     [switch]$Clean
 )
 
@@ -35,6 +36,13 @@ if (-not (Test-Path -LiteralPath $Bench -PathType Leaf)) {
 }
 
 $env:GGML_VULKAN_PTQ1_XMX = "1"
+if ($Validate) {
+    $env:GGML_VULKAN_PTQ1_XMX_VALIDATE = "1"
+    Write-Host "PTQ1 validation readback: ON (host-fenced diagnostic mode)"
+} else {
+    Remove-Item Env:GGML_VULKAN_PTQ1_XMX_VALIDATE -ErrorAction SilentlyContinue
+    Write-Host "PTQ1 validation readback: OFF (async timeline critical path)"
+}
 if ($Tile -eq 0) {
     Remove-Item Env:GGML_VULKAN_PTQ1_XMX_TILE -ErrorAction SilentlyContinue
     Write-Host "PTQ1 token tile: auto (n=2 -> T2, n=4 -> T4, other n -> baseline)"
