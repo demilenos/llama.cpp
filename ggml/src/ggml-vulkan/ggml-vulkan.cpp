@@ -4500,6 +4500,17 @@ vk_device ggml_vk_get_device(size_t idx) {
                 GGML_LOG_DEBUG("ggml_vulkan: WARNING: No suitable matrix core mode found. Disabling matrix cores.\n");
                 device->coopmat_support = false;
             }
+
+            if (getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+                GGML_LOG_INFO(
+                    "ggml_vulkan: PTQ1 probe | coopmat=%d fp_shape=%ux%ux%u int8_coopmat=%d int8_shape=%ux%ux%u int_dot=%d subgroup_min=%u subgroup_max=%u\n",
+                    device->coopmat_support ? 1 : 0,
+                    device->coopmat_m, device->coopmat_n, device->coopmat_k,
+                    device->coopmat_int_support ? 1 : 0,
+                    device->coopmat_int_m, device->coopmat_int_n, device->coopmat_int_k,
+                    device->integer_dot_product ? 1 : 0,
+                    device->subgroup_min_size, device->subgroup_max_size);
+            }
         }
 
         if (device->coopmat_support) {
