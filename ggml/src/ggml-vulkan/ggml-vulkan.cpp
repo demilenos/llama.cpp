@@ -332,6 +332,7 @@ struct vk_queue_handle {
 struct vk_queue_handle_synchronized : vk_queue_handle {
     std::mutex mutex;
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
         std::lock_guard<std::mutex> guard(mutex);
         try {
             queue.submit(submits, fence);
@@ -348,6 +349,7 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
 
 struct vk_queue_handle_unsynchronized : vk_queue_handle {
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
         // Driver guarantees internal synchronization via VK_KHR_internally_synchronized_queues
         try {
             queue.submit(submits, fence);
