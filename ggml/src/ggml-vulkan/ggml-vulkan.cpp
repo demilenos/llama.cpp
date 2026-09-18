@@ -2,6 +2,12 @@
 #ifdef GGML_VULKAN_PTQ1_XMX
 #include "ggml-vulkan-external.h"
 #include "maple_ptq1_ggml_bridge.hpp"
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <windows.h>
+#endif
 #endif
 #include <vulkan/vulkan_core.h>
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
