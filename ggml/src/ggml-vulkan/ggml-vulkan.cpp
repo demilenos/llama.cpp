@@ -6148,6 +6148,18 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
     const bool aligned = !quantize_y && ne10 == kpad && ne01 > 8 && ne11 > 8;
 
     vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, ne11, aligned, false);
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+        static bool ptq1_pp_route_logged = false;
+        if (!ptq1_pp_route_logged) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 PP route | xmx_cm1=%d quantize_y=%d n=%llu k=%llu pipeline=%s\n",
+                (ctx->device->coopmat_support && !ctx->device->coopmat2) ? 1 : 0,
+                quantize_y ? 1 : 0,
+                (unsigned long long) ne11,
+                (unsigned long long) ne10,
+                pipeline ? pipeline->name.c_str() : "(null)");
+            ptq1_pp_route_logged = true;
+        }
+    }
 
     if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_TRACE") != nullptr) {
         static std::atomic<uint32_t> ptq1_pp_trace_count { 0 };
@@ -6487,6 +6499,18 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     // Check for mmq first
     vk_pipeline dmmv = quantize_y ? ggml_vk_get_dequantize_mul_mat_vec(ctx, src0->type, GGML_TYPE_Q8_1, ne11, ne20, ne00) : nullptr;
     vk_pipeline to_q8_1 = nullptr;
+
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+        static bool ptq1_tg_route_logged = false;
+        if (!ptq1_tg_route_logged) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 TG route | q8_1=%d dp4a=%d n=%llu k=%llu\n",
+                quantize_y ? 1 : 0,
+                dmmv != nullptr ? 1 : 0,
+                (unsigned long long) ne11,
+                (unsigned long long) ne00);
+            ptq1_tg_route_logged = true;
+        }
+    }
 
     if (dmmv == nullptr) {
         // Fall back to f16 dequant mul mat
