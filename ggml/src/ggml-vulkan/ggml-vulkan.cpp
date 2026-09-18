@@ -1,4 +1,14 @@
 #include "ggml-vulkan.h"
+#ifdef GGML_VULKAN_PTQ1_XMX
+#include "ggml-vulkan-external.h"
+#include "maple_ptq1_ggml_bridge.hpp"
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+#include <windows.h>
+#endif
+#endif
 #include <vulkan/vulkan_core.h>
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
 #include <chrono>
@@ -316,6 +326,9 @@ static void ggml_vk_print_device_lost_info(const vk_device& device);
 
 // Prevent simultaneous submissions to the same queue.
 struct vk_queue_handle {
+#ifdef GGML_VULKAN_PTQ1_XMX
+    std::recursive_mutex external_mutex;
+#endif
     vk::Queue queue;
     vk_device_ref device;
     virtual void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) = 0;
@@ -327,6 +340,9 @@ struct vk_queue_handle {
 struct vk_queue_handle_synchronized : vk_queue_handle {
     std::mutex mutex;
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+#ifdef GGML_VULKAN_PTQ1_XMX
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
+#endif
         std::lock_guard<std::mutex> guard(mutex);
         try {
             queue.submit(submits, fence);
@@ -343,6 +359,9 @@ struct vk_queue_handle_synchronized : vk_queue_handle {
 
 struct vk_queue_handle_unsynchronized : vk_queue_handle {
     void submit(vk::ArrayProxy<const vk::SubmitInfo> submits, vk::Fence fence) override {
+#ifdef GGML_VULKAN_PTQ1_XMX
+        std::lock_guard<std::recursive_mutex> external_guard(external_mutex);
+#endif
         // Driver guarantees internal synchronization via VK_KHR_internally_synchronized_queues
         try {
             queue.submit(submits, fence);
@@ -779,6 +798,7 @@ static constexpr uint32_t GGML_VK_FWHT_MAX_SUBGROUP_EL_W = 64;
 static constexpr uint32_t GGML_VK_FWHT_ROWS              = 4;
 
 struct vk_device_struct {
+    std::atomic<bool> external_poisoned{false};
     std::recursive_mutex mutex;
     mutable std::shared_mutex pinned_memory_mutex;
 
@@ -797,6 +817,7 @@ struct vk_device_struct {
     uint64_t suballocation_block_size;
     uint64_t min_imported_host_pointer_alignment;
     bool external_memory_host {};
+    bool external_memory_win32 {};
     bool fp16;
     bool bf16;
     bool pipeline_robustness;
@@ -1230,6 +1251,12 @@ struct vk_buffer_struct {
     vk::DeviceAddress bda_addr {};
 
     vk_device device;
+    bool external_exportable = false;
+    uint64_t external_allocation_id = 0;
+    size_t memory_allocation_size = 0;
+#if defined(_WIN32)
+    HANDLE exported_handle = nullptr;
+#endif
 
     ~vk_buffer_struct() {
         if (size == 0) {
@@ -1237,8 +1264,14 @@ struct vk_buffer_struct {
         }
         VK_LOG_DEBUG("~vk_buffer_struct(" << buffer << ", " << size << ")");
 
-        device->device.freeMemory(device_memory);
+#if defined(_WIN32)
+        if (exported_handle) {
+            CloseHandle(exported_handle);
+            exported_handle = nullptr;
+        }
+#endif
         device->device.destroyBuffer(buffer);
+        device->device.freeMemory(device_memory);
     }
 };
 
@@ -3422,7 +3455,7 @@ static std::vector<uint32_t> ggml_vk_find_memory_properties(const vk::PhysicalDe
 }
 
 static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std::initializer_list<vk::MemoryPropertyFlags> & req_flags_list,
-                                       void *import_ptr = nullptr) {
+                                       void *import_ptr = nullptr, bool export_win32 = false) {
     VK_LOG_DEBUG("ggml_vk_create_buffer(" << device->name << ", " << size << ", " << to_string(req_flags_list.begin()[0]) << ", " << to_string(req_flags_list.begin()[req_flags_list.size()-1]) << ")");
     if (size > device->max_buffer_size) {
         throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds device buffer size limit");
@@ -3455,17 +3488,29 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     if (import_ptr) {
         external_memory_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
         buffer_create_info.setPNext(&external_memory_bci);
+    } else if (export_win32) {
+        external_memory_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+        buffer_create_info.setPNext(&external_memory_bci);
     }
 
     buf->buffer = device->device.createBuffer(buffer_create_info);
 
     vk::MemoryRequirements mem_req = device->device.getBufferMemoryRequirements(buf->buffer);
+    buf->memory_allocation_size = mem_req.size;
 
     vk::PhysicalDeviceMemoryProperties mem_props = device->physical_device.getMemoryProperties();
 
     const vk::MemoryPriorityAllocateInfoEXT mem_priority_info { 1.0f };
 
     vk::MemoryAllocateFlagsInfo mem_flags_info { mem_flags };
+    vk::MemoryDedicatedAllocateInfo dedicated_info;
+    dedicated_info.buffer = buf->buffer;
+    vk::ExportMemoryAllocateInfo export_memory_info;
+    if (export_win32) {
+        export_memory_info.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eOpaqueWin32;
+        dedicated_info.setPNext(&mem_flags_info);
+        export_memory_info.setPNext(&dedicated_info);
+    }
 
     if (device->memory_priority) {
         mem_flags_info.setPNext(&mem_priority_info);
@@ -3528,7 +3573,11 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
 
             for (auto mtype_it = memory_type_indices.begin(); mtype_it != memory_type_indices.end(); mtype_it++) {
                 try {
-                    buf->device_memory = device->device.allocateMemory({ mem_req.size, *mtype_it, &mem_flags_info });
+                    buf->device_memory = device->device.allocateMemory({
+                        mem_req.size,
+                        *mtype_it,
+                        export_win32 ? static_cast<const void *>(&export_memory_info)
+                                     : static_cast<const void *>(&mem_flags_info) });
                     buf->memory_property_flags = mem_props.memoryTypes[*mtype_it].propertyFlags;
                     done = true;
                     break;
@@ -3568,6 +3617,41 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     buf->device = device;
     buf->size = size;
 
+#if defined(_WIN32)
+    if (export_win32) {
+        try {
+            using get_handle_fn = VkResult (VKAPI_PTR *)(
+                VkDevice, const VkMemoryGetWin32HandleInfoKHR *, HANDLE *);
+            auto get_handle = reinterpret_cast<get_handle_fn>(
+                vkGetDeviceProcAddr(
+                    static_cast<VkDevice>(device->device),
+                    "vkGetMemoryWin32HandleKHR"));
+            VkMemoryGetWin32HandleInfoKHR handle_info{
+                VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR,
+                nullptr,
+                static_cast<VkDeviceMemory>(buf->device_memory),
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT };
+            HANDLE handle = nullptr;
+            if (get_handle &&
+                get_handle(
+                    static_cast<VkDevice>(device->device),
+                    &handle_info,
+                    &handle) == VK_SUCCESS) {
+                buf->exported_handle = handle;
+                buf->external_exportable = true;
+                static std::atomic<uint64_t> next_external_allocation_id{1};
+                buf->external_allocation_id = next_external_allocation_id.fetch_add(1);
+            }
+        } catch (const vk::SystemError & error) {
+            GGML_LOG_WARN(
+                "ggml_vulkan: Win32 external memory export unavailable (%s)\n",
+                error.what());
+        }
+    }
+#else
+    GGML_UNUSED(export_win32);
+#endif
+
     if (device->buffer_device_address) {
         const vk::BufferDeviceAddressInfo addressInfo(buf->buffer);
         buf->bda_addr = device->device.getBufferAddress(addressInfo);
@@ -3588,34 +3672,34 @@ static vk_buffer ggml_vk_create_buffer_check(vk_device& device, size_t size, vk:
     }
 }
 
-static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size) {
+static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size, bool export_win32 = false) {
     vk_buffer buf;
     try {
         if (device->prefer_host_memory) {
             buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
-                                                       vk::MemoryPropertyFlagBits::eDeviceLocal});
+                                                       vk::MemoryPropertyFlagBits::eDeviceLocal}, nullptr, export_win32);
         } else if (device->uma) {
             // On UMA, prefer host-visible memory so direct tensor borrowing works.
             // If unavailable, fall back to device-local memory.
             buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
                                                        vk::MemoryPropertyFlagBits::eDeviceLocal,
-                                                       vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+                                                       vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent}, nullptr, export_win32);
         } else if (device->disable_host_visible_vidmem) {
             if (device->allow_sysmem_fallback) {
                 buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal,
-                                                           vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+                                                           vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent}, nullptr, export_win32);
             } else {
-                buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal});
+                buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal}, nullptr, export_win32);
             }
         } else {
             // use rebar if available, otherwise fallback to device only visible memory
             if (device->allow_sysmem_fallback) {
                 buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
                                                            vk::MemoryPropertyFlagBits::eDeviceLocal,
-                                                           vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
+                                                           vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent}, nullptr, export_win32);
             } else {
                 buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
-                                                           vk::MemoryPropertyFlagBits::eDeviceLocal});
+                                                           vk::MemoryPropertyFlagBits::eDeviceLocal}, nullptr, export_win32);
             }
         }
     } catch (const vk::SystemError& e) {
@@ -6256,6 +6340,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         bool dot2_f16_support = false;
         bool ocp_microscaling_extension = false;
         bool shader_float8_extension = false;
+        bool external_memory_win32_support = false;
 
         for (const auto& properties : ext_props) {
             if (strcmp("VK_KHR_maintenance4", properties.extensionName) == 0) {
@@ -6316,6 +6401,10 @@ static vk_device ggml_vk_get_device(size_t idx) {
                 device->memory_priority = true;
             } else if (strcmp("VK_EXT_external_memory_host", properties.extensionName) == 0) {
                 device->external_memory_host = true;
+#if defined(GGML_VULKAN_PTQ1_XMX) && defined(_WIN32)
+            } else if (strcmp("VK_KHR_external_memory_win32", properties.extensionName) == 0) {
+                external_memory_win32_support = true;
+#endif
 #if defined(VK_EXT_shader_64bit_indexing)
             } else if (strcmp("VK_EXT_shader_64bit_indexing", properties.extensionName) == 0) {
                 device->shader_64b_indexing = true;
@@ -6667,6 +6756,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
         if (device->external_memory_host) {
             device_extensions.push_back("VK_EXT_external_memory_host");
         }
+#if defined(GGML_VULKAN_PTQ1_XMX) && defined(_WIN32)
+        device->external_memory_win32 = external_memory_win32_support;
+        if (device->external_memory_win32) {
+            device_extensions.push_back("VK_KHR_external_memory_win32");
+        }
+#endif
 
 #if defined(VK_EXT_shader_64bit_indexing)
         VkPhysicalDeviceShader64BitIndexingFeaturesEXT shader_64bit_indexing_features {};
@@ -16203,7 +16298,14 @@ static ggml_backend_buffer_t ggml_backend_vk_buffer_type_alloc_buffer(ggml_backe
 
     vk_buffer dev_buffer = nullptr;
     try {
+#ifdef GGML_VULKAN_PTQ1_XMX
+        const char * ptq1_xmx = getenv("GGML_VULKAN_PTQ1_XMX");
+        const bool export_win32 =
+            ptq1_xmx && strcmp(ptq1_xmx, "1") == 0 && ctx->device->external_memory_win32;
+        dev_buffer = ggml_vk_create_buffer_device(ctx->device, size, export_win32);
+#else
         dev_buffer = ggml_vk_create_buffer_device(ctx->device, size);
+#endif
     } catch (const vk::SystemError& e) {
         return nullptr;
     }
@@ -17132,9 +17234,18 @@ static int32_t find_first_set(uint32_t x) {
     return ret;
 }
 
+#ifdef GGML_VULKAN_PTQ1_XMX
+#include "ggml-vulkan-external.inc"
+#endif
+
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+#ifdef GGML_VULKAN_PTQ1_XMX
+    if (ctx->device->external_poisoned) {
+        return GGML_STATUS_FAILED;
+    }
+#endif
 
     ctx->device->diag_cgraph = nullptr;
     ctx->device->diag_prev_start = -1;
@@ -17265,6 +17376,40 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         if (first_node_in_batch) {
             submit_node_idx = i;
         }
+
+#ifdef GGML_VULKAN_PTQ1_XMX
+        if (!vk_perf_logger_enabled && maple_ptq1_xmx_supported(cgraph->nodes[i])) {
+            if (ggml_is_empty(cgraph->nodes[i])) {
+                continue;
+            }
+            if (!first_node_in_batch) {
+                vk_context flush_ctx = ggml_vk_get_compute_ctx(ctx);
+                ggml_vk_ctx_end(flush_ctx);
+                flush_ctx->exit_tensor_idx = -1;
+                ctx->compute_ctx.reset();
+                ggml_vk_compute_forward(
+                    ctx,
+                    cgraph,
+                    cgraph->nodes[submit_node_idx],
+                    submit_node_idx,
+                    false);
+                submit_after(submit_node_idx, i - 1);
+            }
+
+            ggml_vk_synchronize(ctx);
+            if (ggml_vk_ptq1_external_compute(ctx, cgraph->nodes[i])) {
+                first_node_in_batch = true;
+                continue;
+            }
+            if (ctx->device->external_poisoned) {
+                return GGML_STATUS_FAILED;
+            }
+            // Import/export was unavailable before ownership release. The graph is
+            // synchronized here, so recording the ordinary Vulkan PTQ1 node is safe.
+            first_node_in_batch = true;
+            submit_node_idx = i;
+        }
+#endif
 
         {
             auto node_flops = ggml_vk_get_node_flops(cgraph->nodes[i]);
