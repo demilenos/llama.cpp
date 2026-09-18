@@ -946,6 +946,7 @@ public:
 
     std::vector<llm_graph_input_ptr> inputs;
     std::vector<llm_graph_fused_node> fused_nodes;
+    std::vector<std::shared_ptr<void>> custom_node_data;
 
     ggml_context_ptr ctx_compute;
 

@@ -1,0 +1,27 @@
+Test project C:/AI/llama-maple-integration/maple-w2-xmx-v0.4/build-level4-cpu
+      Start  1: maple-reference-tests
+ 1/11 Test  #1: maple-reference-tests ................   Passed    0.12 sec
+      Start  2: maple-a8-reference-tests
+ 2/11 Test  #2: maple-a8-reference-tests .............   Passed    0.09 sec
+      Start  3: maple-moe-reference-tests
+ 3/11 Test  #3: maple-moe-reference-tests ............   Passed    0.03 sec
+      Start  4: maple-grouping-reference-tests
+ 4/11 Test  #4: maple-grouping-reference-tests .......   Passed    0.07 sec
+      Start  5: maple-gemm-reference-tests
+ 5/11 Test  #5: maple-gemm-reference-tests ...........   Passed    0.04 sec
+      Start  6: maple-architecture-reference-tests
+ 6/11 Test  #6: maple-architecture-reference-tests ...   Passed    0.04 sec
+      Start  7: maple-submission-mock-tests
+ 7/11 Test  #7: maple-submission-mock-tests ..........   Passed    0.02 sec
+      Start  8: maple-token-reuse-emulation-tests
+ 8/11 Test  #8: maple-token-reuse-emulation-tests ....   Passed    0.69 sec
+      Start  9: python-tests
+ 9/11 Test  #9: python-tests .........................   Passed    1.59 sec
+      Start 10: maple-level4-contract-tests
+10/11 Test #10: maple-level4-contract-tests ..........   Passed    0.19 sec
+      Start 11: maple-level4-host-tests
+11/11 Test #11: maple-level4-host-tests ..............   Passed    0.34 sec
+
+100% tests passed out of 11
+
+Total Test time (real) =   3.42 sec

@@ -7,3 +7,4 @@ __pycache__/
 *.exe
 
 _w2_port_backups/
+/logs/

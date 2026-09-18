@@ -1,0 +1,7 @@
+device=Intel(R) Arc(TM) A750 Graphics
+driver=1.15.39183+4
+DPAS_S2_S8_PROBE PASS cases=36 outputs=288 (ISA disassembly still required)
+MULTITOKEN_DPAS_PROBE PASS repeat=4 cases=37 outputs=1184 (functional only; inspect ISA separately)
+MULTITOKEN_DPAS_PROBE PASS repeat=8 cases=37 outputs=2368 (functional only; inspect ISA separately)
+GROUPING_PROBE PASS cases=48 job_entries=102828 invalid bucket + canaries + changed IDs + OOO
+TILE_PLAN_PROBE PASS cases=108 RC4/8 tails, invalid bucket, changed IDs, OOO and canaries

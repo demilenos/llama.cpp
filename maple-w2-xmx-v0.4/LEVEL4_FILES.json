@@ -1,0 +1,30 @@
+{
+  "format_version": 1,
+  "requires": "XMX v0.4 + architecture port v1 API, already-merged module root",
+  "operation": "add-new-files-only; optional append CMake include",
+  "files": {
+    "README.LEVEL4.ko.md": "bded73e21bac3a77b82dcaeb2635fe5c7f14af9089123e5216c3003f3f612157",
+    "build_level4_and_test.cmd": "6a923091a56c10afc21e2044f98af2c3e490fd3bd32f0f460864a10b36d6771a",
+    "cmake/level4.cmake": "1356a7ef2783328cb934a35e16442d2bd8b566117c13a0c58b266ce08e69837d",
+    "docs/LEVEL4.ko.md": "1380902428ca71c15930a3a7e56d17aa21a13f87fb9ff98f3ac73eda2351f45e",
+    "include/level4_bridge.hpp": "f7e9af99a0c6b21cdc4b8b57c757014f422e1852b032f5da79ae6e76f7519538",
+    "include/level4_contract.hpp": "5b96f0839ca19f37aa5749332d5451d82db7a2ce6d4f83ac438ae3488c42156b",
+    "include/level4_reference.hpp": "8e6b176005fe8fa85a409b0084c9dfc683e5d8d2a3cd718c333b3347212788c9",
+    "include/maple_level4.hpp": "e9bb50c2ce31e7e731111d57084bffa644cc93685dbfe7f464c6dcc00bf47c35",
+    "integration/ggml_level4_contract.hpp": "b81bf75a30e0f16da18e88b2791e2ed1f64fdf5c8f5a5ffbf074fce2cfa0a84f",
+    "integration/level4_win32_compile_probe.cpp": "de1d4f17ce8cae59b188e3bc128976fb2f9bf28a829173eaf38ec35f1de5b50a",
+    "integration/level4_win32_memory.hpp": "15a69848b4bc76ff2bbd2b444ec54a8dc515d6ffa122a8379cd06bfd5cb43408",
+    "scripts/build_level4_and_test.ps1": "d329fe30204cbfc0991168c0ad49b3917c3d5a7c80f4bc7880e1691998d95f20",
+    "src/maple_level4.cpp": "b11ba1fec65a6f349e9f59634f44ceb1b51a229350e2bc02468fdb2512ca6cca",
+    "tests/level4_contract_tests.cpp": "e928c1b5508356998842b98130c8d73c276497eb6b7a8ff935d6384ddc983ce7",
+    "tests/level4_host_tests.cpp": "b2128bc7386a32ae8fdce46fab0bf6706c934e5e8c729164a8b70142064df9aa",
+    "tests/level4_mock/sycl/sycl.hpp": "cea73dd167508828cacd4ed90796950f2861e150d7bae0d82dc9b7485a07d5d2",
+    "tests/test_level4_upgrade.py": "0bf8f358544c2f7055e97f82805fa3f7dc4c6dc05dc37bb6e9687af9510ad9f5",
+    "tools/analyze_level4_trace.py": "35b99dd118e13bb6feac8738394f5e57c463891c6bc063625e82ecd305f4b7e4",
+    "tools/apply_level4_upgrade.py": "0ee1063c8d7176a4ef634bc903a6c52fbeb59c3d9fa56084b45b7c4268e6cced",
+    "tools/level4_probe.cpp": "10c5ea566308859b8dbd2f7e786563d9acf50750e5402d90c80f7cb1fe2997c9",
+    "tools/stamp_level4_build.py": "c05b2c02a1cc6dfa1a0f8d07efb6fcf1a134eb9e0f7e038b427ea4569ffbe930",
+    "validation-level4/VALIDATION.ko.md": "8cfc2ffca30684812a6a33c79f7fbc708a9043c01daca9cc2a9ab32aa2b8ff68",
+    "validation-level4/PROVENANCE.json": "a5b2da5beb80e6f2fdfbaeba300344300dd3aad67a334a14c152488eb31c9d7a"
+  }
+}

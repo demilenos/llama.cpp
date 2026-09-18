@@ -228,6 +228,11 @@ endif()
 # build the library
 #
 
+option(LLAMA_MAPLE_LEVEL4 "Build experimental host-staged Maple Level 4 XMX islands" OFF)
+if (LLAMA_MAPLE_LEVEL4)
+    set(MAPLE_BUILD_SYCL ON CACHE BOOL "Build Maple SYCL kernels" FORCE)
+    add_subdirectory(maple-w2-xmx-v0.4)
+endif()
 add_subdirectory(src)
 
 #

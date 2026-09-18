@@ -1,4 +1,11 @@
 #include "models.h"
+#include "llama-adapter.h"
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#ifdef LLAMA_MAPLE_LEVEL4
+#include "llama-maple-level4.h"
+#endif
 
 void llama_model_maple::load_arch_hparams(llama_model_loader & ml) {
     hparams.swa_type = LLAMA_SWA_TYPE_STANDARD;
@@ -73,14 +80,113 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
     auto * inp_attn = build_attn_inp_kv_iswa();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+    const char * level4_env = std::getenv("LLAMA_MAPLE_LEVEL4");
+    const bool level4 = level4_env && std::strcmp(level4_env, "1") == 0;
+#ifndef LLAMA_MAPLE_LEVEL4
+    if (level4) {
+        throw std::runtime_error("LLAMA_MAPLE_LEVEL4 requires a build with -DLLAMA_MAPLE_LEVEL4=ON");
+    }
+#else
+    unsigned token_tile = 4;
+    ggml_tensor * island = nullptr;
+    if (level4) {
+        const char * tile = std::getenv("LLAMA_MAPLE_TOKEN_TILE");
+        if (tile) {
+            if (!std::strcmp(tile, "1")) token_tile = 1;
+            else if (!std::strcmp(tile, "4")) token_tile = 4;
+            else if (!std::strcmp(tile, "8")) token_tile = 8;
+            else throw std::runtime_error("LLAMA_MAPLE_TOKEN_TILE must be 1, 4 or 8");
+        }
+        if ((loras && !loras->empty()) || hparams.f_clamp_kqv > 0 || n_tokens > 2048) {
+            throw std::runtime_error("Maple Level 4 does not support LoRA, QKV clamp or ubatch > 2048");
+        }
+        for (int il = 0; il < n_layer; ++il) {
+            const auto & l = model.layers[il];
+            if ((cvec && cvec->tensor_for(il)) || l.wqkv || l.wq_b || l.wk_b || l.wv_b ||
+                l.wo_b || l.wq_s || l.wk_s || l.wv_s || l.wo_s || hparams.swiglu_clamp_exp[il] != 7.0f) {
+                throw std::runtime_error("Maple Level 4 requires plain separate QKV/O and clamped SwiGLU without adapters");
+            }
+            for (auto * w : {l.wq, l.wk, l.wv, l.wo, l.ffn_gate_exps, l.ffn_up_exps, l.ffn_down_exps}) {
+                if (!w || w->type != GGML_TYPE_TQ2_0 || !ggml_is_contiguous(w)) {
+                    throw std::runtime_error("Maple Level 4 requires contiguous TQ2_0 projection/expert weights");
+                }
+            }
+        }
+    }
+    auto make_island = [&](ggml_tensor * residual, ggml_tensor * attention, int current, int next) {
+        auto data = std::make_shared<llama_maple_level4_params>();
+        data->hidden = n_embd;
+        data->attention = n_embd_head * n_head;
+        data->q_width = n_embd_head * n_head;
+        data->kv_width = n_embd_head * n_head_kv;
+        data->ffn = hparams.n_ff_exp(current < 0 ? next : current);
+        data->experts = n_expert;
+        data->topk = n_expert_used;
+        data->epsilon = hparams.f_norm_rms_eps;
+        data->current_layer = current;
+        data->next_layer = next;
+        data->token_tile = token_tile;
+        if (current >= 0) {
+            const auto & l = model.layers[current];
+            data->o = l.wo;
+            data->ffn_norm = l.ffn_norm;
+            data->router = l.ffn_gate_inp;
+            data->gate = l.ffn_gate_exps;
+            data->up = l.ffn_up_exps;
+            data->down = l.ffn_down_exps;
+            data->clamp = hparams.swiglu_clamp_exp[current];
+        }
+        if (next >= 0) {
+            const auto & l = model.layers[next];
+            data->q = l.wq;
+            data->k = l.wk;
+            data->v = l.wv;
+            data->next_attn_norm = l.attn_norm;
+        }
+        ggml_tensor * args[] = {ggml_cont(ctx0, residual), attention ? ggml_cont(ctx0, attention) : nullptr};
+        const int64_t width = n_embd + (next >= 0 ? data->q_width + 2*data->kv_width : 0);
+        auto * out = ggml_custom_4d(ctx0, GGML_TYPE_F32, width, residual->ne[1], 1, 1,
+                args, attention ? 2 : 1, llama_maple_level4_compute, 1, data.get());
+        res->custom_node_data.push_back(data);
+        // The CPU scheduler owns host transfers; the callback executes SYCL XMX.
+        ggml_backend_sched_set_tensor_backend(sched, out, backend_cpu);
+        cb(out, next < 0 ? "maple_l4_terminal" : current < 0 ? "maple_l4_bootstrap" : "maple_l4_advance", current);
+        return out;
+    };
+    if (level4) {
+        island = make_island(inpL, nullptr, -1, 0);
+        inpL = ggml_view_2d(ctx0, island, n_embd, n_tokens, island->nb[1], 0);
+    }
+#endif
+
     for (int il = 0; il < n_layer; ++il) {
         ggml_tensor * inpSA = inpL;
 
-        ggml_tensor * cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
-        cb(cur, "attn_norm", il);
+        ggml_tensor * cur = nullptr;
+        if (!level4) {
+            cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
+            cb(cur, "attn_norm", il);
+        }
 
         {
-            auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur, n_embd_head, n_head, n_head_kv, il);
+            ggml_tensor * Qcur, * Kcur, * Vcur;
+#ifdef LLAMA_MAPLE_LEVEL4
+            if (level4) {
+                const size_t qoff = n_embd * sizeof(float);
+                const size_t koff = qoff + n_embd_head * n_head * sizeof(float);
+                const size_t voff = koff + n_embd_head * n_head_kv * sizeof(float);
+                Qcur = ggml_view_3d(ctx0, island, n_embd_head, n_head, n_tokens,
+                        n_embd_head * sizeof(float), island->nb[1], qoff);
+                Kcur = ggml_view_3d(ctx0, island, n_embd_head, n_head_kv, n_tokens,
+                        n_embd_head * sizeof(float), island->nb[1], koff);
+                Vcur = ggml_view_3d(ctx0, island, n_embd_head, n_head_kv, n_tokens,
+                        n_embd_head * sizeof(float), island->nb[1], voff);
+            } else
+#endif
+            {
+                auto qkv = build_qkv(model.layers[il], cur, n_embd_head, n_head, n_head_kv, il);
+                Qcur = qkv.q; Kcur = qkv.k; Vcur = qkv.v;
+            }
 
             Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
             Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, nullptr, LLM_NORM_RMS, il);
@@ -102,7 +208,7 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
             cb(Vcur, "Vcur", il);
 
             cur = build_attn(inp_attn,
-                    model.layers[il].wo, nullptr, model.layers[il].wo_s,
+                    level4 ? nullptr : model.layers[il].wo, nullptr, level4 ? nullptr : model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
             cb(cur, "attn_out", il);
         }
@@ -112,6 +218,15 @@ llama_model_maple::graph::graph(const llama_model & model, const llm_graph_param
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
 
+#ifdef LLAMA_MAPLE_LEVEL4
+        if (level4) {
+            const int next = il + 1 < n_layer ? il + 1 : -1;
+            island = make_island(inpSA, cur, il, next);
+            inpL = ggml_view_2d(ctx0, island, n_embd, island->ne[1], island->nb[1], 0);
+            cb(inpL, "l_out", il);
+            continue;
+        }
+#endif
         ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
         cb(ffn_inp, "ffn_inp", il);
 

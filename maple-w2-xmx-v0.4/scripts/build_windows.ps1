@@ -15,6 +15,10 @@ if(-not $Compiler){
 if(-not $Compiler){throw 'Intel oneAPI compiler not found. Initialize oneAPI + MSVC first.'}
 $CC=Get-Command $Compiler -ErrorAction SilentlyContinue
 if(-not $CC){throw 'Intel oneAPI compiler not found. Use build_and_test.cmd or an initialized oneAPI + MSVC shell.'}
+function Get-Sha256([string]$Path){
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$stream=[IO.File]::OpenRead($Path);try{return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant()}finally{$stream.Dispose()}}finally{$sha.Dispose()}
+}
 function Invoke-Logged([string]$Program,[string[]]$CommandArgs,[string]$Log){
     Write-Host ($Program+' '+($CommandArgs -join ' '))
     $Saved=$ErrorActionPreference
@@ -69,14 +73,14 @@ try{
         $SourceFiles=@(Get-ChildItem (Join-Path $Root 'include') -Filter '*.hpp')+@(Get-ChildItem (Join-Path $Root 'src') -Filter '*.cpp')+@(Get-Item (Join-Path $Root "tools/$($Tool[0]).cpp"))
         foreach($File in ($SourceFiles | Sort-Object FullName)){
             $Relative=$File.FullName.Substring($Root.Length+1).Replace('\','/')
-            $Hashes[$Relative]=(Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $Hashes[$Relative]=(Get-Sha256 $File.FullName)
         }
         $ObjectHashes=[ordered]@{}
-        foreach($Object in $Objects){$ObjectHashes[$Object]=(Get-FileHash -LiteralPath (Join-Path $Root $Object) -Algorithm SHA256).Hash.ToLowerInvariant()}
+        foreach($Object in $Objects){$ObjectHashes[$Object]=(Get-Sha256 (Join-Path $Root $Object))}
         $Version='0.4';$ManifestName='grouping-build.json'
         if($IsGemm){$Version='0.5';$ManifestName='gemm-build.json'}
         $Manifest=[ordered]@{version=$Version;compiler=$CC.Source;flags=$Flags;builtins=$Builtins;source_sha256=$Hashes;object_sha256=$ObjectHashes;
-            executable_sha256=(Get-FileHash -LiteralPath (Join-Path $Build "$($Tool[1]).exe") -Algorithm SHA256).Hash.ToLowerInvariant()}
+            executable_sha256=(Get-Sha256 (Join-Path $Build "$($Tool[1]).exe"))}
         $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Build $ManifestName) -Encoding UTF8
     }
     Write-Host 'Build complete. GPU kernels compiled once for all comparators. No ggml DLL or launch settings changed.'

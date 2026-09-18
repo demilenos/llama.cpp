@@ -16,7 +16,7 @@ struct MoeOptions {
     // Default false: enqueue_moe returns before GPU completion.
     bool diagnostic_host_waits=false;
     // v0.4 sole optimization: stable expert-major job order, built every call.
-    // No multi-token DPAS tile or GEMM; original dot arithmetic is retained.
+    // v0.5 adds optional grouped multi-token DPAS; RC1 remains the default.
     bool expert_grouping=false;
     // Appended fields preserve source-level aggregate initialization of v0.4.
     MoeSchedule schedule=MoeSchedule::inherit_v04;

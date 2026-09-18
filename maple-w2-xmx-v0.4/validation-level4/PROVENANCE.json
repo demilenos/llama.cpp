@@ -1,0 +1,38 @@
+{
+  "name": "XMX v0.4 Level4 additive upgrade v1",
+  "design_attribution": "Attention-to-attention island / boundary amortization proposed by the user.",
+  "baseline": "Previously supplied v0.4 architecture port v1; call the existing merged module, do not replace it.",
+  "not_the_latest_merged_llama_cpp_source": true,
+  "source_archives": {
+    "maple-w2-xmx-v0.4-source.zip": "606d2937ff6cf267050112650913561a74532a7e990f55736eea06a2341eb008",
+    "maple-w2-xmx-v0.4-vulkan-port-v1.zip": "96fae936031bf3e30b95886281378c58ec1fba36f8fa6317365da47ba60b96ca",
+    "maple-w2-xmx-v0.4-full-20260918.zip": "7831ec323b67b3056f17d0d33ceaae257b4c1440c531a73f81c485a0da6c6336"
+  },
+  "untouched_core": {
+    "include/a8_contract_audit.hpp": "14acc051e8c25d77fb6cd7217edef1f8e4b9df68c27f5684695269faabb4fbba",
+    "include/dg2_validation.hpp": "0283bea9f7036eec1c17a1f091dd601861535526643467ba986c90a3bc3ab0ae",
+    "include/expert_grouping.hpp": "67c690d8e7525ca180be13aa8dfe10a11b1364518c8bb4adcbe84c9c610db1ee",
+    "include/expert_grouping_reference.hpp": "dc1f299054f892f6e0a3337decc59a5e4c98795672f2878cb011912bc8e65632",
+    "include/expert_token_tiles.hpp": "fe0ceb001f91399e51c9d80ceaaf0046874cd46d8a42255f95965c96c243e283",
+    "include/maple_moe.hpp": "2d47e84b0cc62a6dddab4b04e639fb6de31fa926fbe9838af3c55afd1325a751",
+    "include/maple_w2a16.hpp": "b169fd04530d8b45b0376b9f2420ac5b27de51bd8075f1b1ef6453a9a810e3f4",
+    "include/maple_w2a8.hpp": "57c774792c9a48dab9e451c5f22593bdc45f2dffd0538d57f2b72ad68ec8b3a1",
+    "include/moe_dispatch_policy.hpp": "fc6949ac3eae172853c6a6c59dbfb304d6e6b92fd7abffddfdc0eec07190c731",
+    "include/moe_profiling.hpp": "3f376be1acc0987d5712c80b82fe6b9927c6dd3006d7e915528322dfc8090d6a",
+    "include/moe_reference.hpp": "118f3ce8e1a4321b4770fe6f31f1a341ed62d02feae99f609130ddde0e232c0a",
+    "include/tq2_reference.hpp": "10da29588c589a0da52179a5d9f273b40aca4da920615956e607947c0aa9c77b",
+    "include/w2a8_reference.hpp": "05e0e065a6c8cb9e73bf6f5e6546317e7ae185df057527f823117d5c382c3479",
+    "src/expert_grouping.cpp": "d3dfd64f3ca11d2c824eb31bee91de7d654b9928cea5c3e3ee6ed5e49135f265",
+    "src/maple_moe.cpp": "8578b5a38d9cfb66a0706abfeca9be651f5843cc0d9c7f45e5e9185b0b5b7858",
+    "src/maple_w2a16.cpp": "849627fb35ca8bc5ca4ae47e9113de95a85de0fdc67b9b5e44b7f6642f2e30dd",
+    "src/maple_w2a8.cpp": "089299fac64d8cbea7c04814f3c82822e4daa1910bdc99a903908149c34430f5",
+    "src/maple_w2a8_grouped.cpp": "b2716d53c31819e4dc933583d15414a47d910b2925359e27c3b279b62cf8e468"
+  },
+  "explicitly_preserved_tools": {
+    "tools/grouping_compare.cpp": "adbe9e8400aeafe147ea4f305e6888c691a1b88d206d9865ed741e8b8f9c4195"
+  },
+  "actual_user_merged_changes": "Latest result hashes differed in maple_moe.cpp and grouping_compare.cpp. Overlay never writes either.",
+  "llama_reference_only": "demilenos/llama.cpp fed6590fd2e64da55baa4a31788dfb12454b1844 src/models/maple.cpp (read through connected GitHub; not treated as current user tree)",
+  "gpu_device_compilation": "NOT RUN",
+  "graph_hook_registration": "NOT IMPLEMENTED; explicit integration callbacks required"
+}

@@ -1,0 +1,205 @@
+{
+  "scope": "Short model smoke and top-20 logprob parity, not full-logit or quality parity. Host-staged experimental runtime.",
+  "model": "maple-preview-TQ2_0-head-F16.gguf",
+  "model_bytes": 6349082144,
+  "server_runs": [
+    {
+      "tile": "baseline",
+      "content": " Paris.",
+      "tokens_predicted": 2,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 5,
+        "prompt_ms": 28.934,
+        "prompt_per_token_ms": 5.7868,
+        "prompt_per_second": 172.80707817792216,
+        "predicted_n": 2,
+        "predicted_ms": 9.374,
+        "predicted_per_token_ms": 9.374,
+        "predicted_per_second": 106.67804565820353
+      },
+      "status": "PASS"
+    },
+    {
+      "tile": "1",
+      "content": " Paris.",
+      "tokens_predicted": 2,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 5,
+        "prompt_ms": 31550.733,
+        "prompt_per_token_ms": 6310.1466,
+        "prompt_per_second": 0.15847492354615025,
+        "predicted_n": 2,
+        "predicted_ms": 15630.294,
+        "predicted_per_token_ms": 15630.294,
+        "predicted_per_second": 0.06397832312047362
+      },
+      "status": "PASS"
+    },
+    {
+      "tile": "4",
+      "content": " Paris.",
+      "tokens_predicted": 2,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 5,
+        "prompt_ms": 31325.226000000002,
+        "prompt_per_token_ms": 6265.0452000000005,
+        "prompt_per_second": 0.15961576781600872,
+        "predicted_n": 2,
+        "predicted_ms": 15414.225,
+        "predicted_per_token_ms": 15414.225,
+        "predicted_per_second": 0.06487513968428513
+      },
+      "status": "PASS"
+    },
+    {
+      "tile": "8",
+      "content": " Paris.",
+      "tokens_predicted": 2,
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 5,
+        "prompt_ms": 30263.159,
+        "prompt_per_token_ms": 6052.6318,
+        "prompt_per_second": 0.1652173852703216,
+        "predicted_n": 2,
+        "predicted_ms": 15432.497000000001,
+        "predicted_per_token_ms": 15432.497000000001,
+        "predicted_per_second": 0.06479832784027108
+      },
+      "status": "PASS"
+    }
+  ],
+  "vs_rc1": {
+    "baseline": {
+      "same_output": true,
+      "same_top20_ids": false,
+      "max_common_top20_logprob_delta": 0.9447412490844727
+    },
+    "4": {
+      "same_output": true,
+      "same_top20_ids": true,
+      "max_common_top20_logprob_delta": 0.0
+    },
+    "8": {
+      "same_output": true,
+      "same_top20_ids": true,
+      "max_common_top20_logprob_delta": 0.0
+    }
+  },
+  "dispatch": {
+    "1": {
+      "completions": 99,
+      "layers": [
+        -1,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ],
+      "token_counts": [
+        1,
+        2,
+        4
+      ]
+    },
+    "4": {
+      "completions": 99,
+      "layers": [
+        -1,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ],
+      "token_counts": [
+        1,
+        2,
+        4
+      ]
+    },
+    "8": {
+      "completions": 99,
+      "layers": [
+        -1,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ],
+      "token_counts": [
+        1,
+        2,
+        4
+      ]
+    }
+  },
+  "binary_sha256": {
+    "ggml-vulkan.dll": "dad55149870747c6ff6072a1a684a8b4c7fa48c175ee0211031f4c560dc395e7",
+    "llama-cli.exe": "4905cceb5a2672314a5b14afdf6568417a0a9051f1edc8906e72fe468acb4417",
+    "llama-server.exe": "5a6767682b5bff7f2e954cb95d0360026a323d98a40d5c34549c4bb9eaf2fcff",
+    "llama.dll": "6d2b1be2868ebd84c97c325899f2c41b43a5fa02d380b97cda0cf0b74a0cd636"
+  }
+}
