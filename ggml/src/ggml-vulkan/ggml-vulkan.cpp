@@ -6126,6 +6126,18 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
 
     vk_pipeline pipeline = ggml_vk_guess_matmul_pipeline_map(ctx, *mmp_map, ne01, ne11, aligned, false);
 
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_TRACE") != nullptr) {
+        static std::atomic<uint32_t> ptq1_pp_trace_count { 0 };
+        if (ptq1_pp_trace_count.fetch_add(1) < 16) {
+            GGML_LOG_INFO(
+                "ggml_vulkan: PTQ1 route=%s m=%llu n=%llu k=%llu pipeline=%s coopmat_shape=%ux%ux%u\n",
+                (!quantize_y && ctx->device->coopmat_support) ? "pp-xmx" : (quantize_y ? "pp-dp4a" : "pp-fallback"),
+                (unsigned long long) ne01, (unsigned long long) ne11, (unsigned long long) ne10,
+                pipeline ? pipeline->name.c_str() : "<null>",
+                ctx->device->coopmat_m, ctx->device->coopmat_n, ctx->device->coopmat_k);
+        }
+    }
+
     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
         pipeline = ggml_vk_get_64b_indexing_pipeline(ctx, pipeline);
     }
@@ -6457,6 +6469,17 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
         // Fall back to f16 dequant mul mat
         dmmv = ggml_vk_get_dequantize_mul_mat_vec(ctx, src0->type, src1->type, ne11, ne20, ne00);
         quantize_y = false;
+    }
+
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_TRACE") != nullptr) {
+        static std::atomic<uint32_t> ptq1_tg_trace_count { 0 };
+        if (ptq1_tg_trace_count.fetch_add(1) < 16) {
+            GGML_LOG_INFO(
+                "ggml_vulkan: PTQ1 route=%s rows=%llu cols=%llu k=%llu pipeline=%s\n",
+                quantize_y ? "tg-dp4a" : "tg-fallback",
+                (unsigned long long) ne20, (unsigned long long) ne11, (unsigned long long) ne00,
+                dmmv ? dmmv->name.c_str() : "<null>");
+        }
     }
 
     if (quantize_y) {
