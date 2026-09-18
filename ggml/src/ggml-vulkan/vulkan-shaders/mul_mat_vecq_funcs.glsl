@@ -157,6 +157,63 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 }
 #endif
 
+#if defined(DATA_A_PTQ1_0)
+// PTQ1_0 stores 128 ternary weights in 24 base-3 bytes plus two tail bytes.
+// The canonical decoder repeatedly multiplies by 3 modulo 256.  For digit plane p,
+// the same digit is ((byte * 3^(p+1)) >> 8) mod 3.  The intermediate is < 256,
+// so x % 3 is evaluated exactly as x - 3*((x*171)>>9), avoiding integer division.
+uint ptq1_digit_fast(const uint b, const uint plane) {
+    const uvec4 pow3 = uvec4(3u, 9u, 27u, 81u);
+    const uint factor = plane < 4u ? pow3[plane] : 243u;
+    const uint x = (b * factor) >> 8u;
+    return x - 3u * ((x * 171u) >> 9u);
+}
+
+int32_t ptq1_pack4(const uint ib, const uint e0) {
+    uint packed = 0u;
+
+    [[unroll]] for (uint lane = 0u; lane < 4u; ++lane) {
+        const uint e = e0 + lane;
+        uint b;
+        uint plane;
+
+        if (e < 80u) {
+            b = uint(data_a[ib].qs[e & 15u]);
+            plane = e >> 4u;
+        } else if (e < 120u) {
+            const uint t = e - 80u;
+            b = uint(data_a[ib].qs[16u + (t & 7u)]);
+            plane = t >> 3u;
+        } else {
+            const uint t = e - 120u;
+            b = uint(data_a[ib].qh[t & 1u]);
+            plane = t >> 1u;
+        }
+
+        packed |= ptq1_digit_fast(b, plane) << (8u * lane);
+    }
+
+    // Convert byte lanes {0,1,2} to signed ternary {-1,0,+1} without
+    // allowing a borrow to cross byte boundaries.
+    return int32_t(((packed ^ 0x80808080u) - 0x01010101u) ^ 0x80808080u);
+}
+
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    // The generic MMVQ scheduler addresses A in Q8_1-sized 32-element chunks.
+    // Four such chunks share one PTQ1_0 scale/block.
+    const uint ib = ib_a >> 2u;
+    const uint e0 = ((ib_a & 3u) << 5u) + iqs * 16u;
+
+    int32_t q_sum = 0;
+    q_sum += dotPacked4x8EXT(ptq1_pack4(ib, e0 +  0u), cache_b_qs[0]);
+    q_sum += dotPacked4x8EXT(ptq1_pack4(ib, e0 +  4u), cache_b_qs[1]);
+    q_sum += dotPacked4x8EXT(ptq1_pack4(ib, e0 +  8u), cache_b_qs[2]);
+    q_sum += dotPacked4x8EXT(ptq1_pack4(ib, e0 + 12u), cache_b_qs[3]);
+
+    return FLOAT_TYPE(float(data_a[ib].d) * cache_b_ds.x * float(q_sum));
+}
+#endif
+
 #if defined(DATA_A_Q2_0)
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     int32_t q_sum = 0;

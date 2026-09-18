@@ -20,6 +20,20 @@ static int ptq1_0_trit(const block_ptq1_0 * x, const int e) {
     return (int)((v * 3) >> 8) - 1;
 }
 
+// Vulkan Q8-DMMV closed-form digit decoder.  This is intentionally independent
+// of the iterative CUDA accessor so the integer-dot shader's math is checked here.
+static int ptq1_0_trit_vulkan_q8(const block_ptq1_0 * x, const int e) {
+    uint8_t b; int n;
+    if (e < 80)       { b = x->qs[e & 15];                  n = e >> 4; }
+    else if (e < 120) { const int t = e - 80; b = x->qs[16 + (t & 7)]; n = t >> 3; }
+    else              { const int t = e - 120; b = x->qh[t & 1];       n = t >> 1; }
+
+    static const uint32_t pow3[5] = {3, 9, 27, 81, 243};
+    const uint32_t v = (uint32_t(b) * pow3[n]) >> 8;
+    const uint32_t mod3 = v - 3u * ((v * 171u) >> 9);
+    return int(mod3) - 1;
+}
+
 // --- the CPU reference traversal from ggml-quants.c dequantize_row_ptq1_0 ---
 static void cpu_ref(const block_ptq1_0 * x, int * out) {
     const uint8_t pow3[6] = {1,3,9,27,81,243};
@@ -51,14 +65,16 @@ int main(void) {
         int ref[QK_PTQ1_0]; cpu_ref(&blk, ref);
         for (int e = 0; e < QK_PTQ1_0; ++e) {
             ++total;
-            if (ptq1_0_trit(&blk, e) != ref[e]) {
-                if (bad < 5) printf("  MISMATCH blk%d e=%d cuda=%d cpu=%d\n", trial, e, ptq1_0_trit(&blk,e), ref[e]);
+            const int cuda = ptq1_0_trit(&blk, e);
+            const int vkq8 = ptq1_0_trit_vulkan_q8(&blk, e);
+            if (cuda != ref[e] || vkq8 != ref[e]) {
+                if (bad < 5) printf("  MISMATCH blk%d e=%d cuda=%d vkq8=%d cpu=%d\n", trial, e, cuda, vkq8, ref[e]);
                 ++bad;
             }
         }
     }
     printf("  checked %ld element positions across 20000 random blocks\n", total);
     printf("  mismatches: %ld\n", bad);
-    printf("  %s\n", bad==0 ? "CUDA element mapping MATCHES the CPU codec exactly" : "MAPPING BUG");
+    printf("  %s\n", bad==0 ? "CUDA and Vulkan-Q8 element mappings MATCH the CPU codec exactly" : "MAPPING BUG");
     return bad != 0;
 }
