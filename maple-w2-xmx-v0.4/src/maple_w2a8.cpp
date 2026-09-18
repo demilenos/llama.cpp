@@ -297,6 +297,87 @@ static sycl::event launch(sycl::queue& q,DeviceProblem p,A8Options opt,A8Workspa
           });
     });
 }
+
+// Dense PTQ1 decode specialization for the llama.cpp bridge. One ESIMD work-item
+// owns an M8 output tile for T activation rows. The raw 1.75-bpw PTQ1 K32
+// fragment is decoded once, kept in GRF, then consumed by T independent DPAS
+// instructions. Accumulators stay token-private; no cross-token reduction exists.
+template<int T> class Ptq1DenseTokenReuse;
+template<int T>
+static sycl::event launch_ptq1_dense_tiles(sycl::queue& q,DeviceProblem p,A8Options o,A8Workspace a,
+                                            const std::vector<sycl::event>& deps) {
+    static_assert(T==2||T==4,"PTQ1 dense token tile must be T2 or T4");
+    const size_t tiles=(size_t(p.tokens)+T-1)/T;
+    const uint32_t rtiles=p.shape.m/8;
+    const size_t logical=tiles*rtiles;
+    const size_t global=((logical+o.kernel.local_size-1)/o.kernel.local_size)*o.kernel.local_size;
+    return q.submit([&](sycl::handler& h) {
+        h.depends_on(deps);
+        h.parallel_for<Ptq1DenseTokenReuse<T>>(
+          sycl::nd_range<1>{sycl::range<1>(global),sycl::range<1>(o.kernel.local_size)},
+          [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL {
+            size_t idx=it.get_global_linear_id();if(idx>=logical)return;
+            const uint32_t rt=uint32_t(idx%rtiles);const size_t tile=idx/rtiles;
+            const uint32_t first=uint32_t(tile*T);
+            const uint32_t remain=p.tokens-first;
+            const uint32_t len=remain<uint32_t(T)?remain:uint32_t(T);
+
+            uint32_t token[T];bool valid[T];es::simd<float,8> acc[T];
+            #pragma unroll
+            for(int t=0;t<T;++t) {
+                token[t]=0;valid[t]=false;acc[t]=0.f;
+                if(uint32_t(t)<len) {
+                    token[t]=first+uint32_t(t);
+                    const int32_t id=p.ids[token[t]];
+                    valid[t]=id==0;
+                    if(!valid[t]&&rt==0)p.status[token[t]]=1;
+                }
+            }
+
+            const uint32_t nk=p.shape.k/256;
+            const size_t row_stride=size_t(nk)*2*ptq1_block_bytes;
+            es::simd<uint32_t,32> ao(0,1),oo(0,4);
+            for(uint32_t kb=0;kb<nk;++kb) {
+                es::simd<uint16_t,8> ds_lo,ds_hi;
+                #pragma unroll
+                for(int r=0;r<8;++r) {
+                    const size_t wb=size_t(rt*8+r)*row_stride+size_t(kb)*2*ptq1_block_bytes;
+                    ds_lo[r]=*reinterpret_cast<const uint16_t*>(p.w0+wb+26);
+                    ds_hi[r]=*reinterpret_cast<const uint16_t*>(p.w0+wb+ptq1_block_bytes+26);
+                }
+                const es::simd<sycl::half,8> hd_lo=ds_lo.template bit_cast_view<sycl::half>();
+                const es::simd<sycl::half,8> hd_hi=ds_hi.template bit_cast_view<sycl::half>();
+                const es::simd<float,8> dw_lo=es::convert<float>(hd_lo);
+                const es::simd<float,8> dw_hi=es::convert<float>(hd_hi);
+                const size_t wb=size_t(rt*8)*row_stride+size_t(kb)*2*ptq1_block_bytes;
+
+                #pragma unroll
+                for(uint32_t kg=0;kg<256;kg+=32) {
+                    // The expensive base-3 decode is outside the token loop.
+                    const es::simd<uint32_t,16> b=pack_native_ptq1(p.w0+wb,row_stride,kg);
+                    const es::simd<float,8> sw=kg<128?dw_lo:dw_hi;
+                    #pragma unroll
+                    for(int t=0;t<T;++t) if(uint32_t(t)<len&&valid[t]) {
+                        const size_t ax=size_t(token[t])*p.shape.k+size_t(kb)*256+kg;
+                        const float da=a.scales[ax/32];
+                        const es::simd<int8_t,32> av=es::gather<int8_t,32>(a.q+ax,ao);
+                        es::simd<int32_t,8> ia=0;
+                        ia=xmx::dpas<8,1,int32_t,int32_t,uint32_t,int8_t,
+                            xmx::dpas_argument_type::s2,xmx::dpas_argument_type::s8>(ia,b,av);
+                        acc[t]+=es::convert<float>(ia)*(sw*da);
+                    }
+                }
+            }
+
+            #pragma unroll
+            for(int t=0;t<T;++t) if(uint32_t(t)<len) {
+                const size_t oi=size_t(token[t])*p.shape.m+size_t(rt)*8;
+                es::scatter<float,8>(p.y0+oi,oo,acc[t]);
+            }
+          });
+    });
+}
+
 template<int G,Layout L,bool Pair>
 static A8Run dispatch_mode(sycl::queue& q,DeviceProblem p,A8Options o,A8Workspace w,float* scratch,const std::vector<sycl::event>& deps) {
     A8Run r;
@@ -353,6 +434,19 @@ A8Run enqueue_a8(sycl::queue& q,const DeviceProblem& p,A8Options o,A8Workspace w
     const uint32_t sp=o.kernel.split_k;
     if((sp!=1&&sp!=2&&sp!=4&&sp!=8)||(p.shape.k/256)%sp||!o.kernel.local_size||o.kernel.local_size>32||
        (sp>1&&!scratch))throw std::invalid_argument("invalid split/local/scratch");
+    if(o.ptq1_token_tile!=1) {
+        if((o.ptq1_token_tile!=2&&o.ptq1_token_tile!=4)||o.group!=32||p.layout!=Layout::native_ptq1||
+           p.shape.experts!=1||p.topk!=1||p.per_selection||sp!=1||o.job_order||
+           o.token_tiles.tokens_per_tile>1||o.mode==A8Mode::fused)
+            throw std::invalid_argument("dense PTQ1 token reuse requires single-expert G32 native PTQ1 staged/prequantized split1");
+        A8Run r;std::vector<sycl::event> main_deps=deps;
+        if(o.mode==A8Mode::staged) {
+            r.quant=quantize<32>(q,p,w,deps);r.has_quant=true;main_deps={r.quant};
+        }
+        r.main=o.ptq1_token_tile==2?launch_ptq1_dense_tiles<2>(q,p,o,w,main_deps):
+                                      launch_ptq1_dense_tiles<4>(q,p,o,w,main_deps);
+        r.done=r.main;return r;
+    }
     check_tokens_per_tile(o.token_tiles.tokens_per_tile);
     if(o.token_tiles.tokens_per_tile>1) {
         const auto& t=o.token_tiles;
