@@ -116,7 +116,7 @@ if (Vulkan_FOUND)
         if (NOT WIN32 OR NOT TARGET maple-ptq1-ggml-bridge)
             message(FATAL_ERROR "GGML_VULKAN_PTQ1_XMX requires the Windows Maple PTQ1 bridge target")
         endif()
-        target_compile_definitions(ggml-vulkan PRIVATE GGML_VULKAN_PTQ1_XMX)
+        target_compile_definitions(ggml-vulkan PRIVATE GGML_VULKAN_PTQ1_XMX VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
         target_include_directories(ggml-vulkan PRIVATE
             "${CMAKE_SOURCE_DIR}/maple-w2-xmx-v0.4/include")
         target_link_libraries(ggml-vulkan PRIVATE maple-ptq1-ggml-bridge)
