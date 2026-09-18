@@ -4054,8 +4054,21 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         device->fp16 = !force_disable_f16 && fp16_storage && fp16_compute;
 
-        if (!ggml_vk_khr_cooperative_matrix_support(device->properties, driver_props, device->architecture)) {
+        const bool ptq1_force_xmx =
+            getenv("GGML_VK_PTQ1_FORCE_XMX") != nullptr &&
+            raw_khr_cooperative_matrix &&
+            device->vendor_id == VK_VENDOR_ID_INTEL &&
+            device->architecture == vk_device_architecture::INTEL_XE1 &&
+            device->properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu &&
+            device->driver_id == vk::DriverId::eIntelProprietaryWindows;
+
+        if (!ggml_vk_khr_cooperative_matrix_support(device->properties, driver_props, device->architecture) &&
+            !ptq1_force_xmx) {
             device->coopmat_support = false;
+        }
+
+        if (ptq1_force_xmx) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 forcing VK_KHR_cooperative_matrix on Intel Xe1 discrete GPU\n");
         }
 
         device->integer_dot_product = device->integer_dot_product && shader_integer_dot_product_props.integerDotProduct4x8BitPackedSignedAccelerated;
@@ -4535,6 +4548,16 @@ vk_device ggml_vk_get_device(size_t idx) {
                 device->coopmat_support = false;
             }
 
+            if (getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+                GGML_LOG_INFO(
+                    "ggml_vulkan: PTQ1 final probe | coopmat=%d fp_shape=%ux%ux%u int8_coopmat=%d int8_shape=%ux%ux%u int_dot=%d force_xmx=%d\n",
+                    device->coopmat_support ? 1 : 0,
+                    device->coopmat_m, device->coopmat_n, device->coopmat_k,
+                    device->coopmat_int_support ? 1 : 0,
+                    device->coopmat_int_m, device->coopmat_int_n, device->coopmat_int_k,
+                    device->integer_dot_product ? 1 : 0,
+                    ptq1_force_xmx ? 1 : 0);
+            }
         }
 
         if (device->coopmat_support) {
