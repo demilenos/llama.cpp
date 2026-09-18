@@ -8,9 +8,13 @@
 FLOAT_TYPE get_dm(uint ib) {
     return FLOAT_TYPE(data_a[ib / 2].d);
 }
-#elif defined(DATA_A_Q4_0) || defined(DATA_A_Q5_0) || defined(DATA_A_Q8_0) || defined(DATA_A_PTQ1_0) || defined(DATA_A_IQ1_S) || defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S) || defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ3_S) || defined(DATA_A_IQ4_XS) || defined(DATA_A_IQ4_NL)
+#elif defined(DATA_A_Q4_0) || defined(DATA_A_Q5_0) || defined(DATA_A_Q8_0) || defined(DATA_A_IQ1_S) || defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S) || defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ3_S) || defined(DATA_A_IQ4_XS) || defined(DATA_A_IQ4_NL)
 FLOAT_TYPE get_dm(uint ib) {
     return FLOAT_TYPE(data_a[ib].d);
+}
+#elif defined(DATA_A_PTQ1_0)
+FLOAT_TYPE get_dm(uint ib) {
+    return FLOAT_TYPE(data_a[ib / 4u].d);
 }
 #endif
 
