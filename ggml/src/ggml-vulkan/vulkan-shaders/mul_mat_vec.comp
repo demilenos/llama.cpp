@@ -157,6 +157,36 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
         }
     }
 
+#if defined(DATA_A_PTQ1_0)
+    const uint blocks_per_row = p.ncols / 128u;
+    for (uint lane = tid; lane < blocks_per_row * 32u; lane += BLOCK_SIZE) {
+        const uint block = lane >> 5u;
+        const uint slot = lane & 31u;
+        if (slot >= 26u) {
+            continue;
+        }
+        const uint step = slot < 16u ? 16u : (slot < 24u ? 8u : 2u);
+        const uint first = slot < 16u ? slot : (slot < 24u ? 80u + slot - 16u : 120u + slot - 24u);
+        [[unroll]] for (uint j = 0u; j < NUM_COLS; ++j) {
+            float bv[5];
+            [[unroll]] for (uint digit = 0u; digit < 5u; ++digit) {
+                bv[digit] = (slot < 24u || digit < 4u) ?
+                    float(data_b[j*p.batch_stride_b + b_offset + block*128u + first + digit*step]) : 0.0;
+            }
+            [[unroll]] for (uint n = 0u; n < num_rows; ++n) {
+                const uint ib = a_offset + (first_row + n)*blocks_per_row + block;
+                uint byte_value = slot < 24u ? uint(data_a[ib].qs[slot]) : uint(data_a[ib].qh[slot - 24u]);
+                float sum = 0.0;
+                [[unroll]] for (uint digit = 0u; digit < 5u; ++digit) {
+                    const uint scaled = byte_value * 3u;
+                    sum = fma(float(int(scaled >> 8u) - 1), bv[digit], sum);
+                    byte_value = scaled & 255u;
+                }
+                temp[j][n] += FLOAT_TYPE(float(data_a[ib].d) * sum);
+            }
+        }
+    }
+#else
     uint num_iters = p.ncols / (K_PER_ITER * BLOCK_SIZE);
     if (num_iters * K_PER_ITER * BLOCK_SIZE + K_PER_ITER*tid < p.ncols) {
         num_iters++;
@@ -240,6 +270,8 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
     }
 #if K_PER_ITER == 4
     }
+#endif
+
 #endif
 
     reduce_result(temp, d_offset, first_row, num_rows, tid);
