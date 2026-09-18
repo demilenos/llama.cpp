@@ -8,7 +8,7 @@
 FLOAT_TYPE get_dm(uint ib) {
     return FLOAT_TYPE(data_a[ib / 2].d);
 }
-#elif defined(DATA_A_Q4_0) || defined(DATA_A_Q5_0) || defined(DATA_A_Q8_0) || defined(DATA_A_IQ1_S) || defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S) || defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ3_S) || defined(DATA_A_IQ4_XS) || defined(DATA_A_IQ4_NL)
+#elif defined(DATA_A_Q4_0) || defined(DATA_A_Q5_0) || defined(DATA_A_Q8_0) || defined(DATA_A_PTQ1_0) || defined(DATA_A_IQ1_S) || defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S) || defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ3_S) || defined(DATA_A_IQ4_XS) || defined(DATA_A_IQ4_NL)
 FLOAT_TYPE get_dm(uint ib) {
     return FLOAT_TYPE(data_a[ib].d);
 }
@@ -137,6 +137,49 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 }
 #endif
 
+#if defined(DATA_A_PTQ1_0)
+// PTQ1 is stored as base-3 bytes in K128 blocks. MMVQ presents ib as a
+// K32 coordinate, so each call decodes exactly one Q8_1-sized fragment.
+void repack_ptq1_k32(uint ib, out i32vec4 out0, out i32vec4 out1) {
+    const uint ib128 = ib / 4u;
+    const uint e0 = (ib & 3u) * 32u;
+
+    int32_t packed[8];
+    [[unroll]] for (uint g = 0u; g < 8u; ++g) {
+        i8vec4 q;
+        [[unroll]] for (uint lane = 0u; lane < 4u; ++lane) {
+            const uint e = e0 + g * 4u + lane;
+            const uint bidx = ptq1_0_byte_of(e);
+            const uint qbyte = uint(bidx < 24u ? data_a[ib128].qs[bidx]
+                                               : data_a[ib128].qh[bidx - 24u]);
+            q[lane] = int8_t(int(ptq1_0_trit(qbyte, ptq1_0_digit_of(e))) - 1);
+        }
+        packed[g] = pack32(q);
+    }
+
+    out0 = i32vec4(packed[0], packed[1], packed[2], packed[3]);
+    out1 = i32vec4(packed[4], packed[5], packed[6], packed[7]);
+}
+
+FLOAT_TYPE mmvq_dot_product_ptq1(const uint ib) {
+    i32vec4 q0, q1;
+    repack_ptq1_k32(ib, q0, q1);
+
+    int32_t q_sum = 0;
+    q_sum += dotPacked4x8EXT(q0.x, cache_b_qs[0]);
+    q_sum += dotPacked4x8EXT(q0.y, cache_b_qs[1]);
+    q_sum += dotPacked4x8EXT(q0.z, cache_b_qs[2]);
+    q_sum += dotPacked4x8EXT(q0.w, cache_b_qs[3]);
+    q_sum += dotPacked4x8EXT(q1.x, cache_b_qs[4]);
+    q_sum += dotPacked4x8EXT(q1.y, cache_b_qs[5]);
+    q_sum += dotPacked4x8EXT(q1.z, cache_b_qs[6]);
+    q_sum += dotPacked4x8EXT(q1.w, cache_b_qs[7]);
+
+    const float dw = float(data_a[ib / 4u].d);
+    return FLOAT_TYPE(dw * float(cache_b_ds.x) * float(q_sum));
+}
+#endif
+
 #if defined(DATA_A_MXFP4)
 // 1-byte loads for mxfp4 blocks (17 bytes)
 i32vec2 repack(uint ib, uint iqs) {
@@ -157,7 +200,12 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 }
 #endif
 
-#if defined(DATA_A_Q2_0)
+#if defined(DATA_A_PTQ1_0)
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    // K_PER_ITER=32, therefore iqs is always zero.
+    return mmvq_dot_product_ptq1(ib_a);
+}
+#elif defined(DATA_A_Q2_0)
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     int32_t q_sum = 0;
     const i32vec4 qs_a = repack4(ib_a, iqs);
