@@ -9745,6 +9745,15 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
         to_q8_1 = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
     }
 
+    if (src0->type == GGML_TYPE_PTQ1_0 && getenv("GGML_VK_PTQ1_PROBE") != nullptr) {
+        static std::atomic<uint32_t> probe_count { 0 };
+        if (probe_count.fetch_add(1) < 16) {
+            GGML_LOG_INFO("ggml_vulkan: PTQ1 MMVQ route | dmmv=%s quantize_y=%d ne01=%llu ne11=%llu ne00=%llu\n",
+                dmmv ? dmmv->name.c_str() : "(null)", quantize_y ? 1 : 0,
+                (unsigned long long) ne01, (unsigned long long) ne11, (unsigned long long) ne00);
+        }
+    }
+
     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
         dmmv = ggml_vk_get_64b_indexing_pipeline(ctx, dmmv);
     }
@@ -10182,6 +10191,15 @@ static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, c
     ggml_tensor * src0 = dst->src[0];
     ggml_tensor * src1 = dst->src[1];
     VK_LOG_DEBUG("ggml_vk_mul_mat(" << src0 << ", " << src1 << ", " << dst << ")");
+
+    if (src0->type == GGML_TYPE_F32 && src0->ne[0] == 1024 && getenv("GGML_VK_PTQ1_PROBE")) {
+        static std::atomic<uint32_t> fwht_probe_count { 0 };
+        if (fwht_probe_count.fetch_add(1) < 8) {
+            GGML_LOG_INFO("ggml_vulkan: transform route | hint=%d fwht=%d fused=%u n=%lld name=%s\n",
+                ggml_get_op_params_i32(dst, 1), ggml_vk_can_use_fwht(ctx, src1, dst) ? 1 : 0,
+                ctx->num_additional_fused_ops, (long long) src1->ne[1], dst->name);
+        }
+    }
 
     // Handle huge A matrix by splitting the M dimensions. This works well for convolution use cases
     // where the M dimension is very large.
