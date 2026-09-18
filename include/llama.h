@@ -157,6 +157,10 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
 
+        // Prism-compatible private file type. Keep numeric id 129 so existing
+        // PTQ1 GGUF metadata is reported without rewriting the file.
+        LLAMA_FTYPE_MOSTLY_PTQ1_0        = 129,
+
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };
 

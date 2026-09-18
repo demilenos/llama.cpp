@@ -99,6 +99,8 @@ typedef sycl::half2 ggml_half2;
 #define QI2_0 (QK2_0 / 32)
 #define QR2_0 1
 
+#define QI_PTQ1_0 (QK_PTQ1_0 / 32)
+#define QR_PTQ1_0 1
 
 #define QI4_0 (QK4_0 / (4 * QR4_0))
 #define QR4_0 2
@@ -279,6 +281,18 @@ typedef struct {
     ggml_half d;
 } block_tq1_0;
 static_assert(sizeof(block_tq1_0) == sizeof(ggml_half) + QK_K / 64 + (QK_K - 4 * QK_K / 64) / 5, "wrong tq1_0 block size/padding");
+
+// Prism PTQ1_0: same base-3 trit packing as TQ1_0, but one fp16 scale
+// per 128 weights. 28 bytes / 128 weights = 1.75 bpw.
+#define QK_PTQ1_0 128
+typedef struct {
+    uint8_t qs[(QK_PTQ1_0 - 4 * QK_PTQ1_0 / 64) / 5]; // 24 B -> 120 trits
+    uint8_t qh[QK_PTQ1_0 / 64];                        //  2 B ->   8 trits
+    ggml_half d;
+} block_ptq1_0;
+static_assert(sizeof(block_ptq1_0) == sizeof(ggml_half) + QK_PTQ1_0 / 64 +
+              (QK_PTQ1_0 - 4 * QK_PTQ1_0 / 64) / 5,
+              "wrong ptq1_0 block size/padding");
 
 // 2.0625 bpw
 typedef struct {

@@ -10,6 +10,9 @@
 #include "llama-model-loader.h"
 #include "llama-model-saver.h"
 #include "llama-model.h"
+#ifdef LLAMA_PTQ1_XMX
+#include "llama-ptq1-xmx.h"
+#endif
 
 #include "ggml.h"
 #include "ggml-cpp.h"
@@ -132,6 +135,9 @@ void llama_backend_init(void) {
     if (!ggml_backend_reg_count()) {
         ggml_backend_load_all();
     }
+#ifdef LLAMA_PTQ1_XMX
+    llama_ptq1_xmx_register();
+#endif
 }
 
 void llama_numa_init(enum ggml_numa_strategy numa) {
@@ -147,6 +153,9 @@ void llama_numa_init(enum ggml_numa_strategy numa) {
 }
 
 void llama_backend_free(void) {
+#ifdef LLAMA_PTQ1_XMX
+    llama_ptq1_xmx_shutdown();
+#endif
     ggml_quantize_free();
 }
 

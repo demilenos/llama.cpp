@@ -108,3 +108,26 @@ static bool ggml_vk_external_compute(ggml_backend_vk_context * ctx, ggml_tensor 
         return false;
     }
 }
+
+static bool ggml_vk_ptq1_external_compute(ggml_backend_vk_context * ctx, ggml_tensor * node) {
+    try {
+        const auto executor = vk_ptq1_executor.load();
+        if (!executor) return false;
+        ggml_vk_external_lease lease(ctx);
+        static const ggml_vk_external_api api{1, ggml_vk_external_get_span, ggml_vk_external_release};
+        const bool ok = executor(node, &lease, &api);
+        if (!ok || !lease.released) {
+            if (lease.released || lease.pending) ctx->device->external_poisoned = true;
+            return false;
+        }
+        if (!ggml_vk_external_barrier(&lease, false)) {
+            ctx->device->external_poisoned = true;
+            return false;
+        }
+        return true;
+    } catch (const std::exception & e) {
+        ctx->device->external_poisoned = true;
+        GGML_LOG_ERROR("ggml_vulkan: PTQ1 XMX external execution failed: %s\n", e.what());
+        return false;
+    }
+}

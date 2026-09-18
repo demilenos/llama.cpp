@@ -67,6 +67,13 @@ int main() {
         std::array<int8_t, 128> decoded{};
         maple_w2::decode_ptq1_block(block.data(), decoded.data());
         assert(decoded == input);
+
+        for (uint32_t i = 0; i < maple_w2::ptq1_block_k; ++i) {
+            const auto coord = maple_w2::ptq1_trit_coord(i);
+            assert(coord.byte < 26);
+            assert(coord.trit < 5);
+            assert(maple_w2::ptq1_trit(block[coord.byte], coord.trit) == input[i]);
+        }
     }
 
     const Shape shape{256, 8, 1};

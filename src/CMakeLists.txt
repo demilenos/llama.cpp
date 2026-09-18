@@ -88,6 +88,42 @@ if (LLAMA_MAPLE_LEVEL4)
     target_link_options(llama PRIVATE -fsycl)
 endif()
 
+if (LLAMA_PTQ1_XMX)
+    if (NOT WIN32 OR NOT TARGET maple-w2-xmx OR NOT GGML_VULKAN)
+        message(FATAL_ERROR "PTQ1 XMX runtime requires Windows, GGML_VULKAN and Maple SYCL")
+    endif()
+    find_path(LLAMA_PTQ1_LEVEL_ZERO_INCLUDE_DIR level_zero/ze_api.h
+        HINTS "$ENV{LEVEL_ZERO_V1_SDK_PATH}/include" "$ENV{LEVEL_ZERO_SDK_PATH}/include")
+    find_library(LLAMA_PTQ1_LEVEL_ZERO_LIBRARY ze_loader
+        HINTS "$ENV{LEVEL_ZERO_V1_SDK_PATH}/lib" "$ENV{LEVEL_ZERO_SDK_PATH}/lib")
+    if (NOT LLAMA_PTQ1_LEVEL_ZERO_INCLUDE_DIR OR NOT LLAMA_PTQ1_LEVEL_ZERO_LIBRARY)
+        message(FATAL_ERROR "PTQ1 XMX requires Level Zero SDK headers and ze_loader.lib")
+    endif()
+
+    add_library(llama-ptq1-xmx-runtime STATIC llama-ptq1-xmx.cpp)
+    target_include_directories(llama-ptq1-xmx-runtime PRIVATE
+        .
+        ../ggml/include
+        ../ggml/src
+        ../maple-w2-xmx-v0.4/include
+        "${LLAMA_PTQ1_LEVEL_ZERO_INCLUDE_DIR}")
+    target_link_libraries(llama-ptq1-xmx-runtime PRIVATE
+        maple-w2-xmx
+        ggml
+        "${LLAMA_PTQ1_LEVEL_ZERO_LIBRARY}"
+        dxgi
+        d3d12)
+    set_target_properties(llama-ptq1-xmx-runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if (MSVC)
+        target_compile_options(llama-ptq1-xmx-runtime PRIVATE /EHsc /fp:precise)
+    else()
+        target_compile_options(llama-ptq1-xmx-runtime PRIVATE -fexceptions -fno-fast-math)
+    endif()
+    target_compile_definitions(llama PRIVATE LLAMA_PTQ1_XMX)
+    target_link_libraries(llama PRIVATE $<LINK_ONLY:llama-ptq1-xmx-runtime>)
+    target_link_options(llama PRIVATE -fsycl)
+endif()
+
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
