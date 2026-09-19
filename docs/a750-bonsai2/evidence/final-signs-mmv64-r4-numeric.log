@@ -1,0 +1,24 @@
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 0 | matrix cores: none
+ggml_vulkan: 1 = Intel(R) Arc(TM) A750 Graphics (Intel Corporation) | uma: 0 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
+Testing 3 devices
+
+Backend 1/3: Vulkan0
+  Skipping
+Backend 2/3: Vulkan1
+  Device description: Intel(R) Arc(TM) A750 Graphics
+  Device memory: 8098 MB (7328 MB free)
+
+  MUL_MAT(name=ptq1-tg1,type=f32,ne=[5120,1,1,1],op_params=[],sources=ptq1_0[5120,5120,1,1],f32[5120,1,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-k17408-m5120,type=f32,ne=[5120,1,1,1],op_params=[],sources=ptq1_0[17408,5120,1,1],f32[17408,1,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-k5120-m17408,type=f32,ne=[17408,1,1,1],op_params=[],sources=ptq1_0[5120,17408,1,1],f32[5120,1,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-m513,type=f32,ne=[513,1,1,1],op_params=[],sources=ptq1_0[5120,513,1,1],f32[5120,1,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-n2-m128,type=f32,ne=[128,2,1,1],op_params=[],sources=ptq1_0[5120,128,1,1],f32[5120,2,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-n4-m128,type=f32,ne=[128,4,1,1],op_params=[],sources=ptq1_0[5120,128,1,1],f32[5120,4,1,1]): [1;32mOK[0m
+  MUL_MAT(name=ptq1-n8-m128,type=f32,ne=[128,8,1,1],op_params=[],sources=ptq1_0[5120,128,1,1],f32[5120,8,1,1]): [1;32mOK[0m
+  7/7 tests passed
+  Backend Vulkan1: [1;32mOK[0m
+Backend 3/3: CPU
+  Skipping
+3/3 backends passed
+[1;32mOK[0m

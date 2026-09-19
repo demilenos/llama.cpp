@@ -1,0 +1,12 @@
+Build: 14c1d20c7 (10718)
+Model: C:\AI\bonsai2_27b\Ternary-Bonsai-2-27B-PTQ1_0.gguf
+Device: Vulkan1, -ngl 99, Q8 K/V, -b 512, -ub 512
+MMV: GGML_VK_PTQ1_MMV_WG=64; GGML_VK_PTQ1_MMV_ROWS=4
+FWHT: GGML_VK_A750_FWHT_SHMEM=1; GGML_VK_A750_FWHT_HYBRID=1; GGML_VK_A750_FWHT_SIGNS=1; GGML_VK_A750_FWHT_WG=256
+Submit: GGML_VK_A750_SUBMIT_DIVISOR=16; GGML_VK_MAX_NODES_PER_SUBMIT=256
+Other: GGML_VK_DISABLE_MMVQ=1; GGML_VK_PTQ1_FORCE_XMX unset; GGML_VK_SERIALIZE_SUBMISSIONS unset
+TG128 CPU: llama-bench.exe -m <model> --device Vulkan1 -ngl 99 -ot token_embd.weight=CPU -p 0 -n 128 -r 3 -ctk q8_0 -ctv q8_0 -b 512 -ub 512 -o json
+TG128 GPU: same, token_embd.weight=Vulkan1
+TG1024 CPU: same, -n 1024 -r 3, token_embd.weight=CPU
+PP512: same, -p 512 -n 0 -r 1
+Quality: llama-perplexity.exe -m <model> --device Vulkan1 -ngl 99 --override-tensor token_embd.weight=CPU -f C:\AI\bonsai2_27b\pp-fix\wikitext-2-raw\wiki.test.raw -c 512 -b 512 -ub 1 --chunks 4 --kl-divergence-base C:\AI\bonsai2_27b\pp-fix\baseline.kld --kl-divergence -ctk q8_0 -ctv q8_0 -fa on

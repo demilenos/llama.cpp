@@ -1,0 +1,53 @@
+0.04.473.770 I cmn          init: llama threadpool init, n_threads = 6
+0.06.363.540 I
+0.06.363.578 I system_info: n_threads = 6 (n_threads_batch = 6) / 12 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 |
+0.06.373.743 I kl_divergence: computing over 4 chunks, n_ctx=512, batch_size=512, n_seq=1
+2.32 minutes
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   1       6.3759 ±    1.0490       0.00035 ±    0.00508       0.00368 ±    0.00038     2.180 ±  0.265 %    96.863 ±  1.094 %
+   2       8.7477 ±    1.1229       0.00180 ±    0.00384       0.00349 ±    0.00022     1.898 ±  0.163 %    96.471 ±  0.818 %
+   3       8.1501 ±    0.8243       0.00033 ±    0.00305       0.00365 ±    0.00019     1.990 ±  0.140 %    97.124 ±  0.605 %
+   4       7.9410 ±    0.6695      -0.00179 ±    0.00273       0.00373 ±    0.00015     1.993 ±  0.111 %    97.059 ±  0.529 %
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   7.941050 ±   0.669541
+Mean PPL(base)                :   7.955312 ±   0.673735
+Cor(ln(PPL(Q)), ln(PPL(base))):  99.95%
+Mean ln(PPL(Q)/PPL(base))     :  -0.001794 ±   0.002728
+Mean PPL(Q)/PPL(base)         :   0.998207 ±   0.002723
+Mean PPL(Q)-PPL(base)         :  -0.014262 ±   0.021882
+
+====== KL divergence statistics ======
+Mean    KLD:   0.003725 ±   0.000151
+Maximum KLD:   0.058199
+99.9%   KLD:   0.050608
+99.0%   KLD:   0.022271
+95.0%   KLD:   0.010798
+90.0%   KLD:   0.008035
+Median  KLD:   0.002452
+10.0%   KLD:   0.000349
+ 5.0%   KLD:   0.000102
+ 1.0%   KLD:   0.000006
+ 0.1%   KLD:  -0.000020
+Minimum KLD:  -0.000027
+
+====== Token probability statistics ======
+Mean    Δp: -0.420 ± 0.061 %
+Maximum Δp:  5.423%
+99.9%   Δp:  5.377%
+99.0%   Δp:  4.213%
+95.0%   Δp:  2.134%
+90.0%   Δp:  1.326%
+75.0%   Δp:  0.177%
+Median  Δp: -0.036%
+25.0%   Δp: -0.804%
+10.0%   Δp: -2.474%
+ 5.0%   Δp: -3.808%
+ 1.0%   Δp: -7.704%
+ 0.1%   Δp: -13.794%
+Minimum Δp: -14.357%
+RMS Δp    :  1.993 ± 0.111 %
+Same top p: 97.059 ± 0.529 %
+
+0.41.164.132 I kl_divergence: 34.79 seconds per pass - ETA

@@ -1,0 +1,26 @@
+{
+  "PID": 4068,
+  "ContextSize": 48384,
+  "Port": 9931,
+  "Server": "C:\\AI\\bonsai2_27b\\prismml-llama.cpp\\build-a750-vulkan\\bin\\llama-server.exe",
+  "StdoutLog": "C:\\AI\\bonsai2_27b\\pp-fix\\a750-server-20260919-093929.stdout.log",
+  "StderrLog": "C:\\AI\\bonsai2_27b\\pp-fix\\a750-server-20260919-093929.stderr.log",
+  "CpuEmbedding": true,
+  "MmvWorkgroup": 64,
+  "MmvRows": 4,
+  "FwhtWorkgroup": 256,
+  "SubmitDivisor": 16,
+  "MaxNodesPerSubmit": 256,
+  "HybridFwht": true,
+  "FuseSigns": true,
+  "Environment": {
+    "GGML_VK_DISABLE_MMVQ": "1",
+    "GGML_VK_PTQ1_MMV_WG": "64",
+    "GGML_VK_PTQ1_MMV_ROWS": "4",
+    "GGML_VK_A750_FWHT_WG": "256",
+    "GGML_VK_A750_FWHT_HYBRID": "1",
+    "GGML_VK_A750_FWHT_SIGNS": "1",
+    "GGML_VK_A750_SUBMIT_DIVISOR": "16",
+    "GGML_VK_MAX_NODES_PER_SUBMIT": "256"
+  }
+}

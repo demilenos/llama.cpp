@@ -1,0 +1,14 @@
+PASS K=5120 WG=16: all 5120 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=5120 WG=32: all 5120 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=5120 WG=64: all 5120 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=5120 WG=128: all 5120 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=6144 WG=16: all 6144 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=6144 WG=32: all 6144 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=6144 WG=64: all 6144 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=6144 WG=128: all 6144 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=17408 WG=16: all 17408 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=17408 WG=32: all 17408 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=17408 WG=64: all 17408 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS K=17408 WG=128: all 17408 coordinates covered exactly once; rows 0,1,7,15 identical
+PASS all 256 bytes x 5 digit positions: exact trit decode; mapping identity preserves every decoded weight
+NOTE lane/reduction assignment changes; FP32 accumulation order is not bitwise invariant; GPU numerics/performance still required

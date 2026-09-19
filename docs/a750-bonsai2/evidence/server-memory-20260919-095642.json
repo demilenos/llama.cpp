@@ -1,0 +1,825 @@
+{
+  "ServerPid": 4068,
+  "Port": 9931,
+  "Luid": "0x0001205d",
+  "CounterPath": "\\GPU Adapter Memory(*)\\Dedicated Usage",
+  "RequestedSampleMs": 150,
+  "CounterSamplingNote": "Get-Counter latency can exceed RequestedSampleMs; timestamps are measured intervals, not guaranteed cadence.",
+  "NPredict": 128,
+  "PromptChars": 28711,
+  "DurationMs": 67464.35,
+  "PeakDedicatedMiB": 7580.54,
+  "RemainingMiBOf8098": 517.46,
+  "ValidSamples": 58,
+  "RequestSamples": 57,
+  "FailedSamples": 0,
+  "Samples": [
+    {
+      "TimeMs": 1005.73,
+      "CounterTimestamp": "2026-09-19T09:56:43.5028399+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 2177.47,
+      "CounterTimestamp": "2026-09-19T09:56:44.6747864+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 3339.05,
+      "CounterTimestamp": "2026-09-19T09:56:45.8364774+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 4502.54,
+      "CounterTimestamp": "2026-09-19T09:56:47.0000579+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 5661.11,
+      "CounterTimestamp": "2026-09-19T09:56:48.1585945+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 6837.23,
+      "CounterTimestamp": "2026-09-19T09:56:49.3347061+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 7999.01,
+      "CounterTimestamp": "2026-09-19T09:56:50.496384+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 9162.69,
+      "CounterTimestamp": "2026-09-19T09:56:51.6601972+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 10340.18,
+      "CounterTimestamp": "2026-09-19T09:56:52.8375925+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 11506.63,
+      "CounterTimestamp": "2026-09-19T09:56:54.0039846+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 12686.13,
+      "CounterTimestamp": "2026-09-19T09:56:55.1836322+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 13851.21,
+      "CounterTimestamp": "2026-09-19T09:56:56.3486504+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 15021.08,
+      "CounterTimestamp": "2026-09-19T09:56:57.5184827+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 16199.42,
+      "CounterTimestamp": "2026-09-19T09:56:58.6967756+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 17364.71,
+      "CounterTimestamp": "2026-09-19T09:56:59.8619138+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 18541.63,
+      "CounterTimestamp": "2026-09-19T09:57:01.0391028+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 19703.91,
+      "CounterTimestamp": "2026-09-19T09:57:02.2013773+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 20862.57,
+      "CounterTimestamp": "2026-09-19T09:57:03.3598801+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 22025.93,
+      "CounterTimestamp": "2026-09-19T09:57:04.5230744+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 23187.82,
+      "CounterTimestamp": "2026-09-19T09:57:05.6852374+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 24349.52,
+      "CounterTimestamp": "2026-09-19T09:57:06.8470206+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 25512.11,
+      "CounterTimestamp": "2026-09-19T09:57:08.0095077+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 26669.54,
+      "CounterTimestamp": "2026-09-19T09:57:09.1665801+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 27831.36,
+      "CounterTimestamp": "2026-09-19T09:57:10.3288281+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 29006.93,
+      "CounterTimestamp": "2026-09-19T09:57:11.5043378+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 30174.62,
+      "CounterTimestamp": "2026-09-19T09:57:12.6719588+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 31351.92,
+      "CounterTimestamp": "2026-09-19T09:57:13.8493648+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 32519.72,
+      "CounterTimestamp": "2026-09-19T09:57:15.0172045+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 33696.01,
+      "CounterTimestamp": "2026-09-19T09:57:16.1934979+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 34852.36,
+      "CounterTimestamp": "2026-09-19T09:57:17.3495799+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 36025.04,
+      "CounterTimestamp": "2026-09-19T09:57:18.5224779+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 37186.62,
+      "CounterTimestamp": "2026-09-19T09:57:19.6839321+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 38352.38,
+      "CounterTimestamp": "2026-09-19T09:57:20.8497886+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 39519.12,
+      "CounterTimestamp": "2026-09-19T09:57:22.0162474+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 40697.89,
+      "CounterTimestamp": "2026-09-19T09:57:23.1954027+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 41856.71,
+      "CounterTimestamp": "2026-09-19T09:57:24.3540586+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 43019.35,
+      "CounterTimestamp": "2026-09-19T09:57:25.5168104+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 44195.2,
+      "CounterTimestamp": "2026-09-19T09:57:26.6926694+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 45357.46,
+      "CounterTimestamp": "2026-09-19T09:57:27.8548568+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 46523.32,
+      "CounterTimestamp": "2026-09-19T09:57:29.0208231+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 47695.29,
+      "CounterTimestamp": "2026-09-19T09:57:30.1925489+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 48861.92,
+      "CounterTimestamp": "2026-09-19T09:57:31.3594121+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 50019.75,
+      "CounterTimestamp": "2026-09-19T09:57:32.51722+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 51188.48,
+      "CounterTimestamp": "2026-09-19T09:57:33.6859764+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 52351.3,
+      "CounterTimestamp": "2026-09-19T09:57:34.8488314+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 53513.04,
+      "CounterTimestamp": "2026-09-19T09:57:36.0104634+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 54678.01,
+      "CounterTimestamp": "2026-09-19T09:57:37.1753501+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 55850.75,
+      "CounterTimestamp": "2026-09-19T09:57:38.3481649+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 57031.68,
+      "CounterTimestamp": "2026-09-19T09:57:39.5291726+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 58186.32,
+      "CounterTimestamp": "2026-09-19T09:57:40.6835149+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 59344.88,
+      "CounterTimestamp": "2026-09-19T09:57:41.8423349+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 60497.82,
+      "CounterTimestamp": "2026-09-19T09:57:42.9953029+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 61656.33,
+      "CounterTimestamp": "2026-09-19T09:57:44.1534436+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 62814.24,
+      "CounterTimestamp": "2026-09-19T09:57:45.3116667+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 63970.02,
+      "CounterTimestamp": "2026-09-19T09:57:46.4673643+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 65134.64,
+      "CounterTimestamp": "2026-09-19T09:57:47.6321449+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 66298.5,
+      "CounterTimestamp": "2026-09-19T09:57:48.7959126+09:00",
+      "Phase": "request",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    },
+    {
+      "TimeMs": 67462.1,
+      "CounterTimestamp": "2026-09-19T09:57:49.9595331+09:00",
+      "Phase": "complete",
+      "DedicatedMiB": 7580.5390625,
+      "Instances": [
+        {
+          "Instance": "luid_0x00000000_0x0001205d_phys_0",
+          "DedicatedMiB": 7580.5390625
+        }
+      ]
+    }
+  ],
+  "Response": {
+    "index": 0,
+    "id_slot": 0,
+    "stop": true,
+    "model": "C:\\AI\\bonsai2_27b\\Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+    "tokens_predicted": 128,
+    "tokens_evaluated": 4105,
+    "generation_settings": {
+      "seed": 4294967295,
+      "temperature": 0.699999988079071,
+      "dynatemp_range": 0.0,
+      "dynatemp_exponent": 1.0,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "top_n_sigma": -1.0,
+      "xtc_probability": 0.0,
+      "xtc_threshold": 0.10000000149011612,
+      "typical_p": 1.0,
+      "repeat_last_n": 64,
+      "repeat_penalty": 1.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "dry_multiplier": 0.0,
+      "dry_base": 1.75,
+      "dry_allowed_length": 2,
+      "dry_penalty_last_n": 64,
+      "dry_sequence_breakers": [
+        "\n",
+        ":",
+        "\"",
+        "*"
+      ],
+      "mirostat": 0,
+      "mirostat_tau": 5.0,
+      "mirostat_eta": 0.10000000149011612,
+      "adaptive_target": -1.0,
+      "adaptive_decay": 0.8999999761581421,
+      "stop": [],
+      "max_tokens": 128,
+      "n_predict": 128,
+      "n_keep": 0,
+      "n_discard": 0,
+      "ignore_eos": true,
+      "stream": false,
+      "logit_bias": [
+        {
+          "bias": null,
+          "token": 248044
+        },
+        {
+          "bias": null,
+          "token": 248046
+        },
+        {
+          "bias": null,
+          "token": 248063
+        },
+        {
+          "bias": null,
+          "token": 248064
+        },
+        {
+          "bias": null,
+          "token": 248065
+        }
+      ],
+      "n_probs": 0,
+      "min_keep": 0,
+      "grammar": "",
+      "grammar_lazy": false,
+      "grammar_triggers": [],
+      "preserved_tokens": [],
+      "chat_format": "Content-only",
+      "reasoning_format": "deepseek",
+      "reasoning_in_content": false,
+      "generation_prompt": "",
+      "samplers": [
+        "penalties",
+        "dry",
+        "top_n_sigma",
+        "top_k",
+        "typ_p",
+        "top_p",
+        "min_p",
+        "xtc",
+        "temperature"
+      ],
+      "speculative.types": "none",
+      "timings_per_token": false,
+      "post_sampling_probs": false,
+      "backend_sampling": false,
+      "lora": []
+    },
+    "has_new_line": false,
+    "truncated": false,
+    "stop_type": "limit",
+    "stopping_word": "",
+    "tokens_cached": 4232,
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 4105,
+      "prompt_ms": 56875.003,
+      "prompt_per_token_ms": 13.855055542021924,
+      "prompt_per_second": 72.17582036874794,
+      "predicted_n": 128,
+      "predicted_ms": 8422.891,
+      "predicted_per_token_ms": 66.32197637795275,
+      "predicted_per_second": 15.077958387446781
+    }
+  }
+}

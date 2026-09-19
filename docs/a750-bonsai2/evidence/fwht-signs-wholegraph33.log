@@ -1,0 +1,86 @@
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 0 | matrix cores: none
+ggml_vulkan: 1 = Intel(R) Arc(TM) A750 Graphics (Intel Corporation) | uma: 0 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
+ggml_vulkan: PTQ1 capability | device=Intel(R) Arc(TM) A750 Graphics coopmat=0 shape=0x0x0 int_dot=1 force_xmx=0 shape16_f32=0 shape16_f16=0
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=128 rows=1 name=out
+Testing 3 devices
+
+Backend 1/3: Vulkan0
+  Skipping
+Backend 2/3: Vulkan1
+  Device description: Intel(R) Arc(TM) A750 Graphics
+  Device memory: 8098 MB (7328 MB free)
+
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=64 rows=1 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=128,n=1,k=128,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=256 rows=1 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=64,n=1,k=64,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=512 rows=1 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=256,n=1,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=128 rows=32 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=512,n=1,k=512,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=128 rows=24 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=128,n=32,k=128,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: FWHT dispatch | pipeline=fwht_f32 n=256 rows=512 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=128,n=4,k=128,bs=[2,3],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: transform route | hint=1 fwht=1 fused=0 n=1 name=out
+ggml_vulkan: FWHT dispatch | pipeline=fwht_hybrid_f32 n=1024 rows=1 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=256,n=512,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=1024,n=1,k=1024,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=2048,n=1,k=2048,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=2048,n=32,k=2048,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f16,m=64,n=1,k=64,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f16,m=128,n=32,k=128,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=5120 rows=5 name=out
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f16,m=2048,n=1,k=2048,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=5120 rows=20 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=5120,n_tokens=1,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=6144 rows=6 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=5120,n_tokens=4,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=6144 rows=24 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=6144,n_tokens=1,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=17408 rows=17 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=6144,n_tokens=4,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=17408 rows=68 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=17408,n_tokens=1,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=0 shape=1 flags=16,16,16 name=node_2
+ggml_vulkan: transform route | hint=1 fwht=1 fused=0 n=20 name=node_2
+  MUL_MAT_HADAMARD(blk=1024,width=17408,n_tokens=4,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=1 flags=16,16,16 name=out
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=5120 rows=160 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=5120,n_tokens=4,type_x=f32,shared_intermediate=1): [1;32mOK[0m
+ggml_vulkan: signed FWHT eligibility | pipeline=1 closure=1 shape=0 flags=16,16,16 name=out
+ggml_vulkan: transform route | hint=1 fwht=1 fused=0 n=42 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=5120,n_tokens=32,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+ggml_vulkan: signed FWHT fused | pipeline=fwht_signed_hybrid_f32 width=17408 rows=51 name=out
+  MUL_MAT_HADAMARD(blk=1024,width=6144,n_tokens=7,type_x=f16,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=1024,width=17408,n_tokens=3,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=512,width=4096,n_tokens=7,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=512,width=8192,n_tokens=3,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=2048,width=4096,n_tokens=7,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=2048,width=8192,n_tokens=3,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=4096,width=4096,n_tokens=7,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=4096,width=8192,n_tokens=3,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=4096,width=8192,n_tokens=1,type_x=f16,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=8192,width=8192,n_tokens=2,type_x=f32,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(blk=8192,width=8192,n_tokens=1,type_x=f16,shared_intermediate=0): [1;32mOK[0m
+  MUL_MAT_HADAMARD(type_a=f32,type_b=f32,m=32,n=1,k=32,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0): [1;32mOK[0m
+  33/33 tests passed
+  Backend Vulkan1: [1;32mOK[0m
+Backend 3/3: CPU
+  Skipping
+3/3 backends passed
+[1;32mOK[0m
