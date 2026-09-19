@@ -147,3 +147,7 @@ Existing source changes and earlier evidence are documented in RESULTS.md. No pr
 ## 2026-09-19: memory-budget reporting decision
 
 Report PP graph-buffer delta separately from total dedicated VRAM: matched PP256/512 graph allocations increased0 MiB, but total PP/TG VRAM delta was not measured under matched final conditions. FWHT adds4 KiB/workgroup on-chip shared memory, not VRAM. CPU embedding removes265.23 MiB of GPU model storage. Do not classify existing PP539.52 MiB compute workspace or enlarged KV as tuning-added memory. See MEMORY_BUDGET.md.
+
+## 2026-09-19: measurement archive, deletion pending specific approval
+
+User requested final archival and deletion of measurement originals for later Alchemist reverse engineering. Created archives/alchemist-bonsai2-measurements-20260919-100758.zip (136.05 MiB,355 source files); verified CRC and every file SHA256/size. Original measurements remain intact. Automatic approval review rejected deletion across pp-fix/logs/probe-four/versioned evidence because scope was insufficiently specific. Exact proposal287 files/493.82 MiB is recorded in the adjacent receipt. Preserve current live logs, launch metadata, model, code, fixtures and binaries. Archive helper is copy/verify only and performs no deletion. See ARCHIVE.md.
