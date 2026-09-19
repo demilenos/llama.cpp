@@ -1040,6 +1040,8 @@ void process_shaders() {
     string_to_spv("fwht_f32", "fwht.comp", {});
     string_to_spv("fwht_shmem_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}});
     string_to_spv("fwht_hybrid_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}, {"FWHT_HYBRID", "1"}});
+    string_to_spv("fwht_signed_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}, {"FWHT_SIGNS", "1"}});
+    string_to_spv("fwht_signed_hybrid_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}, {"FWHT_HYBRID", "1"}, {"FWHT_SIGNS", "1"}});
     string_to_spv("fwht_hybrid_f16", "fwht.comp", {{"FWHT_F16", "1"}, {"FWHT_SHMEM", "1"}, {"FWHT_HYBRID", "1"}});
     string_to_spv("fwht_f16", "fwht.comp", {{"FWHT_F16", "1"}});
     string_to_spv("fwht_shmem_f16", "fwht.comp", {{"FWHT_F16", "1"}, {"FWHT_SHMEM", "1"}});

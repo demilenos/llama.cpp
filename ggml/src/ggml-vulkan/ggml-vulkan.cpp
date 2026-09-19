@@ -1054,6 +1054,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_topk_f32[num_topk_pipelines];
     vk_pipeline pipeline_sum_rows_f32;
     vk_pipeline pipeline_fwht_f32[GGML_VK_FWHT_NUM_SIZES];
+    vk_pipeline pipeline_fwht_signed_f32;
     vk_pipeline pipeline_fwht_f16[GGML_VK_FWHT_NUM_SIZES];
     // rows a workgroup covers, chosen per width when the pipeline is built
     uint32_t fwht_rows_per_wg[GGML_VK_FWHT_NUM_SIZES] = {};
@@ -1416,6 +1417,12 @@ struct vk_op_fwht_push_constants {
     uint32_t src_offset;
     uint32_t dst_offset;
     float scale;
+};
+
+struct vk_op_fwht_signed_push_constants {
+    uint32_t n_rows, src_offset, dst_offset;
+    float scale;
+    uint32_t signs_offset, n_blk;
 };
 
 struct vk_op_count_experts_push_constants {
@@ -5922,6 +5929,14 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                     if (device->fp16) {
                         ggml_vk_create_pipeline(device, device->pipeline_fwht_f16[idx], hybrid ? "fwht_hybrid_f16" : "fwht_shmem_f16", hybrid ? fwht_hybrid_f16_len : fwht_shmem_f16_len, hybrid ? fwht_hybrid_f16_data : fwht_shmem_f16_data, "main", 2, sizeof(vk_op_fwht_push_constants), {1, 1, 1}, { block_size, n, rows }, 1, false, hybrid, hybrid ? 16u : 0u);
                     }
+                    if (force_a750_shmem && getenv("GGML_VK_A750_FWHT_SIGNS")) {
+                        ggml_vk_create_pipeline(device, device->pipeline_fwht_signed_f32,
+                            hybrid ? "fwht_signed_hybrid_f32" : "fwht_signed_f32",
+                            hybrid ? fwht_signed_hybrid_f32_len : fwht_signed_f32_len,
+                            hybrid ? fwht_signed_hybrid_f32_data : fwht_signed_f32_data,
+                            "main", 3, sizeof(vk_op_fwht_signed_push_constants), {1, 1, 1}, {block_size, n, 1},
+                            1, false, hybrid, hybrid ? 16u : 0u);
+                    }
                     device->fwht_rows_per_wg[idx] = rows;
                 }
             }
@@ -10214,6 +10229,71 @@ static void ggml_vk_fwht(ggml_backend_vk_context * ctx, vk_context& subctx, cons
     init_pushconst_tensor_offsets(ctx, pc, src, nullptr, nullptr, nullptr, dst);
 
     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc, { workgroups_x, 1, 1 });
+    if (getenv("GGML_VK_PTQ1_PROBE")) {
+        static std::atomic<uint32_t> count {0};
+        if (count.fetch_add(1) < 8) {
+            GGML_LOG_INFO("ggml_vulkan: FWHT dispatch | pipeline=%s n=%lld rows=%u name=%s\n",
+                pipeline->name.c_str(), (long long)src->ne[0], n_rows, dst->name);
+        }
+    }
+}
+
+// Predicate adapted from ggml-cuda.cu's signed FWHT fusion; restrict to contiguous F32.
+static bool ggml_vk_can_fuse_fwht_signed(ggml_backend_vk_context * ctx, const ggml_cgraph * graph, int i) {
+    const bool pattern = i + 2 < graph->n_nodes && graph->nodes[i]->op == GGML_OP_MUL &&
+        graph->nodes[i + 1]->op == GGML_OP_RESHAPE && graph->nodes[i + 2]->op == GGML_OP_MUL_MAT;
+    if (!pattern) {
+        return false;
+    }
+    const bool available = ctx->device->pipeline_fwht_signed_f32 != nullptr;
+    const bool closure = ggml_can_fuse_subgraph(graph, i, {GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT}, {i + 2});
+    const ggml_tensor * mul = graph->nodes[i];
+    const ggml_tensor * reshape = graph->nodes[i + 1];
+    const ggml_tensor * mm = graph->nodes[i + 2];
+    const ggml_tensor * x = mul->src[0];
+    const ggml_tensor * signs = mul->src[1];
+    const bool shape = x && signs && mm->src[0] && mm->src[0]->ne[0] == 1024 && mm->src[0]->ne[1] == 1024 && mm->src[0]->ne[2] == 1 && mm->src[0]->ne[3] == 1 &&
+        ggml_nelements(mm) == ggml_nelements(x) &&
+        ggml_get_op_params_i32(mm, 1) == GGML_HINT_SRC0_IS_HADAMARD &&
+        mm->src[1] == reshape && reshape->src[0] == mul && reshape->ne[0] == 1024 &&
+        x->type == GGML_TYPE_F32 && signs->type == GGML_TYPE_F32 && mul->type == GGML_TYPE_F32 && mm->type == GGML_TYPE_F32 &&
+        signs->ne[1] == 1 && signs->ne[2] == 1 && signs->ne[3] == 1 &&
+        signs->ne[0] == x->ne[0] && signs->ne[0] % 1024 == 0 &&
+        ggml_is_contiguous(x) && ggml_is_contiguous(signs) && ggml_is_contiguous(mul) && ggml_is_contiguous(mm);
+    if (getenv("GGML_VK_PTQ1_PROBE")) {
+        static std::atomic<uint32_t> count {0};
+        if (count.fetch_add(1) < 16) {
+            GGML_LOG_INFO("ggml_vulkan: signed FWHT eligibility | pipeline=%d closure=%d shape=%d flags=%u,%u,%u name=%s\n",
+                available ? 1 : 0, closure ? 1 : 0, shape ? 1 : 0,
+                (unsigned)mul->flags, (unsigned)reshape->flags, (unsigned)mm->flags, mm->name);
+        }
+    }
+    return available && closure && shape;
+}
+
+static void ggml_vk_fwht_signed(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_cgraph * graph, int i) {
+    const ggml_tensor * x = graph->nodes[i]->src[0];
+    const ggml_tensor * signs = graph->nodes[i]->src[1];
+    ggml_tensor * dst = graph->nodes[i + 2];
+    const uint32_t n_rows = (uint32_t)(ggml_nelements(x) / 1024);
+    vk_pipeline pipeline = ctx->device->pipeline_fwht_signed_f32;
+    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+    const vk_subbuffer x_buf = ggml_vk_tensor_subbuffer(ctx, x, true);
+    const vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
+    const vk_subbuffer signs_buf = ggml_vk_tensor_subbuffer(ctx, signs, true);
+    const vk_op_fwht_signed_push_constants pc = {
+        n_rows, (uint32_t)(get_misalign_bytes(ctx, x) / sizeof(float)),
+        (uint32_t)(get_misalign_bytes(ctx, dst) / sizeof(float)), 1.0f / 32.0f,
+        (uint32_t)(get_misalign_bytes(ctx, signs) / sizeof(float)), (uint32_t)(signs->ne[0] / 1024),
+    };
+    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, {x_buf, dst_buf, signs_buf}, pc,
+        {std::min(n_rows, ctx->device->properties.limits.maxComputeWorkGroupCount[0]), 1, 1});
+    if (getenv("GGML_VK_PTQ1_PROBE")) {
+        static std::atomic<uint32_t> count {0};
+        if (count.fetch_add(1) < 8) {
+            GGML_LOG_INFO("ggml_vulkan: signed FWHT fused | pipeline=%s width=%lld rows=%u name=%s\n", pipeline->name.c_str(), (long long)signs->ne[0], n_rows, dst->name);
+        }
+    }
 }
 
 static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
@@ -15687,7 +15767,9 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
 
         break;
     case GGML_OP_MUL:
-        if (ctx->num_additional_fused_ops) {
+        if (ctx->num_additional_fused_ops == 2 && ggml_vk_can_fuse_fwht_signed(ctx, cgraph, node_idx)) {
+            ggml_vk_fwht_signed(ctx, compute_ctx, cgraph, node_idx);
+        } else if (ctx->num_additional_fused_ops) {
             ggml_vk_snake_dispatch_fused(ctx, compute_ctx, cgraph, node_idx);
         } else {
             ggml_vk_mul(ctx, compute_ctx, src0, src1, node);
@@ -17465,6 +17547,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->num_additional_fused_ops = num_adds - 1;
                 fusion_string = "MULTI_ADD";
                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
+            } else if (ggml_vk_can_fuse_fwht_signed(ctx, cgraph, i)) {
+                ctx->num_additional_fused_ops = 2;
+                fusion_string = "MUL_RESHAPE_FWHT";
+                std::fill_n(op_srcs_fused_elementwise, 3, false);
             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD, GGML_OP_ADD })) {
                 ctx->num_additional_fused_ops = 2;
                 fusion_string = "MUL_MAT_ADD_ADD";
@@ -17652,6 +17738,13 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                                 }
                                 if (!found) {
                                     need_disable = true;
+                                    if (fusion_string && strcmp(fusion_string, "MUL_RESHAPE_FWHT") == 0 && getenv("GGML_VK_PTQ1_PROBE")) {
+                                        static std::atomic<uint32_t> count {0};
+                                        if (count.fetch_add(1) < 8) {
+                                            GGML_LOG_INFO("ggml_vulkan: signed FWHT rejected overlap | src=%s dst=%s node=%d source=%u\n",
+                                                src->name, dst->name, k, s);
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -4692,13 +4692,16 @@ struct test_fwht_signed : public test_case {
     const int64_t width;
     const int64_t n_tokens;
     const ggml_type type_x;
+    const bool shared_intermediate;
 
     test_fwht_signed(int64_t blk = 1024, int64_t width = 5120, int64_t n_tokens = 7,
-                     ggml_type type_x = GGML_TYPE_F32)
-        : blk(blk), width(width), n_tokens(n_tokens), type_x(type_x) {}
+                     ggml_type type_x = GGML_TYPE_F32, bool shared_intermediate = false)
+        : blk(blk), width(width), n_tokens(n_tokens), type_x(type_x), shared_intermediate(shared_intermediate) {}
+
+    bool run_whole_graph() override { return true; }
 
     std::string vars() override {
-        return VARS_TO_STR4(blk, width, n_tokens, type_x);
+        return VARS_TO_STR5(blk, width, n_tokens, type_x, shared_intermediate);
     }
 
     std::string op_desc(ggml_tensor * t) override {
@@ -4718,6 +4721,10 @@ struct test_fwht_signed : public test_case {
         cur = ggml_reshape_2d(ctx, cur, blk, width / blk * n_tokens);
         ggml_tensor * out = ggml_mul_mat(ctx, a, cur);
         ggml_mul_mat_set_hint(out, GGML_HINT_SRC0_IS_HADAMARD);
+        if (shared_intermediate) {
+            // The reshape is also consumed outside the candidate fusion; it must remain materialized.
+            out = ggml_add(ctx, out, cur);
+        }
         ggml_set_name(out, "out");
         return out;
     }
@@ -9262,7 +9269,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F16, 64, 1, 64));
     test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F16, 128, 32, 128));
     test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F16, 2048, 1, 2048));
-    test_cases.emplace_back(new test_fwht_signed(1024, 5120, 1));
+    for (int64_t width : {5120, 6144, 17408}) {
+        for (int64_t tokens : {1, 4}) {
+            test_cases.emplace_back(new test_fwht_signed(1024, width, tokens));
+        }
+    }
+    test_cases.emplace_back(new test_fwht_signed(1024, 5120, 4, GGML_TYPE_F32, true));
     test_cases.emplace_back(new test_fwht_signed(1024, 5120, 32));
     test_cases.emplace_back(new test_fwht_signed(1024, 6144, 7, GGML_TYPE_F16));
     test_cases.emplace_back(new test_fwht_signed(1024, 17408, 3));

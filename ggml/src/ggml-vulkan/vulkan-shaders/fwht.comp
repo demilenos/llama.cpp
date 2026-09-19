@@ -21,6 +21,10 @@ layout(push_constant) uniform parameter
     uint src_offset;
     uint dst_offset;
     float scale;
+#ifdef FWHT_SIGNS
+    uint signs_offset;
+    uint n_blk;
+#endif
 };
 
 layout(binding = 0, std430) readonly buffer A {
@@ -31,6 +35,9 @@ layout(binding = 0, std430) readonly buffer A {
 #endif
 };
 layout(binding = 1, std430) writeonly buffer D { float data_d[]; };
+#ifdef FWHT_SIGNS
+layout(binding = 2, std430) readonly buffer S { float data_signs[]; };
+#endif
 
 const uint EL_W = N / BLOCK_SIZE;
 
@@ -69,8 +76,14 @@ void main() {
 
         [[unroll]]
         for (uint i = 0; i < EL_W; ++i) {
+#ifdef FWHT_SIGNS
+            // Preserve the unfused F32 MUL, then FWHT scale operation order.
+            precise float signed_value = row < n_rows ? float(data_a[src_offset + row_offset + i * BLOCK_SIZE + tid]) *
+                data_signs[signs_offset + (row % n_blk) * N + i * BLOCK_SIZE + tid] : 0.0;
+            reg[i] = signed_value * scale;
+#else
             reg[i] = row < n_rows ? float(data_a[src_offset + row_offset + i * BLOCK_SIZE + tid]) * scale : 0.0;
-
+#endif
         }
 
 #ifdef FWHT_SHMEM
