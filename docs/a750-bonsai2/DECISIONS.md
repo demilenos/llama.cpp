@@ -164,3 +164,16 @@ User requested final archival and deletion of measurement originals for later Al
 - Reject the arithmetic result as fully correct: the model named C power116,640 won but omitted it from the total twice. Correct all-option first-month cost is9,092,480 won. It also reversed the capacity-versus-demand relation in one sentence.
 - Use `reasoning_effort: none` for strict-length ordinary chat. The `low` trial consumed its1,400-token limit without yielding a captured final response. Use only `xhigh`, `medium`, or `low` when reasoning is enabled; `max` is rejected by the GGUF Jinja template with HTTP500.
 - The template itself is loaded and applies system/user/assistant roles correctly. Client compatibility and token-budget choices require correction; see CAPABILITY_1000CHAR.md.
+
+## 2026-09-19: server versus client token limit correction
+
+- llama-server exposes `-n/--predict/--n-predict` as the server default generation limit; `-1` means infinity. The current command line explicitly uses `-n -1`, so the server is uncapped by default.
+- OpenAI request fields `max_tokens`, `max_completion_tokens`, and llama.cpp `n_predict` are aliases for the per-request generation limit. A client should send `max_tokens:8192` to cap its own request at 8K.
+- The earlier 8K server cap was a misapplication and was removed. The versioned and working launchers default `PredictTokens` to -1. No client configuration was changed because no single local client configuration was identified; the raw measurement request files are test fixtures only.
+
+## 2026-09-19: n=5 Vulkan shader timing decision
+
+- Adopt per-dispatch Vulkan timestamp queries for shader attribution. Each query brackets one Vulkan dispatch and is converted with the device timestamp period; no per-dispatch CPU wait is inserted.
+- Re-ran the deterministic 512-token prompt with n_predict=5; validation returned tokens_evaluated=512 and tokens_predicted=5 (content qzqzq).
+- Request scope contains one 512-token prefill graph and five 1-token decode graphs. Top-10 totals are in archives/bonsai2-vulkan-shader-n5-timing-20260919.zip; archive SHA256 is 9BEAA98C23A966B86EB1776A1D441C5A1A066E743DF0D5C9962069323BFF884D and internal hashes verified.
+- Restored baseline ggml-vulkan.dll and source, deleted temporary raw probe files after archive verification, and restarted production on 0.0.0.0:9931 with health=ok.
