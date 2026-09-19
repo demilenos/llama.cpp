@@ -833,6 +833,7 @@ struct vk_device_struct {
     bool add_rms_fusion;
     uint32_t partials_binding_alignment;
     uint32_t max_nodes_per_submit;
+    uint32_t submit_flops_divisor = 40;
 
     bool shader_64b_indexing;
 
@@ -6597,6 +6598,20 @@ static vk_device ggml_vk_get_device(size_t idx) {
                                 (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eVote);
 
         // Submit at least every 100 nodes, in case there are workloads without as much matmul.
+        if (device->vendor_id == VK_VENDOR_ID_INTEL && device->properties.deviceID == 0x56a1) {
+            if (const char * value = getenv("GGML_VK_A750_SUBMIT_DIVISOR")) {
+                device->submit_flops_divisor = 0;
+                for (uint32_t candidate : {4u, 8u, 16u, 40u}) {
+                    if (std::string(value) == std::to_string(candidate)) {
+                        device->submit_flops_divisor = candidate;
+                        break;
+                    }
+                }
+                if (device->submit_flops_divisor == 0) {
+                    throw std::runtime_error("GGML_VK_A750_SUBMIT_DIVISOR requires 4,8,16,40");
+                }
+            }
+        }
         device->max_nodes_per_submit = 100;
         const char* GGML_VK_MAX_NODES_PER_SUBMIT = getenv("GGML_VK_MAX_NODES_PER_SUBMIT");
         if (GGML_VK_MAX_NODES_PER_SUBMIT != nullptr) {
@@ -17468,7 +17483,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             flops_cap = 2'000'000'000ULL * ctx->device->shader_core_count;
         }
     }
-    uint64_t flops_per_submit = std::min(flops_cap, ctx->last_total_flops / 40u);
+    uint64_t flops_per_submit = std::min(flops_cap, ctx->last_total_flops / ctx->device->submit_flops_divisor);
 
     auto const submit_after = [&](int start, int end) {
         const bool trace_submit = getenv("GGML_VK_SUBMIT_TRACE") != nullptr;
