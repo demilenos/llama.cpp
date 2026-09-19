@@ -157,3 +157,10 @@ User requested final archival and deletion of measurement originals for later Al
 - Restarted the server with only the listener address changed from 127.0.0.1 to 0.0.0.0. Port remains9931, requested context remains65535 (internal n_ctx_slot65536), Q8 K/V, CPU token embedding and the adopted Vulkan tuning are unchanged.
 - Verification: listener LocalAddress=0.0.0.0, PID3168, health=ok. Full-use VRAM headroom at context65535 remains unmeasured; the prior 48384 gate must not be reused as proof for 65535.
 - Versioned launcher now accepts -HostAddress and defaults its context to65535; the reproducibility command uses -HostAddress 0.0.0.0.
+
+## 2026-09-19: 1000-character capability and template decision
+
+- A 1,023-character Korean reasoning prompt produced 1,312 characters, and the correction turn produced 1,316; both fail the requested 900-1,100 range despite passing all four headings and the fixed final sentence.
+- Reject the arithmetic result as fully correct: the model named C power116,640 won but omitted it from the total twice. Correct all-option first-month cost is9,092,480 won. It also reversed the capacity-versus-demand relation in one sentence.
+- Use `reasoning_effort: none` for strict-length ordinary chat. The `low` trial consumed its1,400-token limit without yielding a captured final response. Use only `xhigh`, `medium`, or `low` when reasoning is enabled; `max` is rejected by the GGUF Jinja template with HTTP500.
+- The template itself is loaded and applies system/user/assistant roles correctly. Client compatibility and token-budget choices require correction; see CAPABILITY_1000CHAR.md.
