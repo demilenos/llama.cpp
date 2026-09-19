@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
     [string] $WorkspaceRoot,
-    [int] $ContextSize = 48384,
+    [int] $ContextSize = 65535,
     [int] $Port = 9931,
+    [string] $HostAddress = '127.0.0.1',
     [switch] $CpuEmbedding = $true,
     [int] $MmvWorkgroup = 64,
     [int] $MmvRows = 4,
@@ -46,9 +47,9 @@ try {
     Remove-Item Env:GGML_VK_PTQ1_FORCE_XMX,Env:GGML_VK_SERIALIZE_SUBMISSIONS,Env:GGML_VK_PTQ1_TILE,Env:GGML_VK_PERF_LOGGER,Env:GGML_VK_PTQ1_PROBE,Env:GGML_VK_DISABLE_FUSION,Env:GGML_VK_SUBMIT_TRACE -ErrorAction SilentlyContinue
 
     $embeddingOverride = if ($CpuEmbedding) { 'token_embd.weight=CPU' } else { 'token_embd.weight=Vulkan1' }
-    $serverArgs = @('-m', ('"' + $model + '"'), '--host', '127.0.0.1', '--port', "$Port", '-c', "$ContextSize", '-ngl', '99', '--device', 'Vulkan1', '-ot', $embeddingOverride, '-ctk', 'q8_0', '-ctv', 'q8_0', '-np', '1', '-b', '512', '-ub', '512', '-fa', 'on', '--jinja', '--temp', '0.7', '--top-p', '0.95', '--top-k', '20')
+    $serverArgs = @('-m', ('"' + $model + '"'), '--host', $HostAddress, '--port', "$Port", '-c', "$ContextSize", '-ngl', '99', '--device', 'Vulkan1', '-ot', $embeddingOverride, '-ctk', 'q8_0', '-ctv', 'q8_0', '-np', '1', '-b', '512', '-ub', '512', '-fa', 'on', '--jinja', '--temp', '0.7', '--top-p', '0.95', '--top-k', '20')
     $proc = Start-Process -FilePath $server -ArgumentList $serverArgs -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-    [pscustomobject]@{ PID = $proc.Id; ContextSize = $ContextSize; Port = $Port; Server = $server; StdoutLog = $stdout; StderrLog = $stderr; CpuEmbedding = [bool]$CpuEmbedding; MmvWorkgroup = $MmvWorkgroup; MmvRows = $MmvRows; FwhtWorkgroup = $FwhtWorkgroup; SubmitDivisor = $SubmitDivisor; MaxNodesPerSubmit = $MaxNodesPerSubmit; HybridFwht = [bool]$HybridFwht; FuseSigns = [bool]$FuseSigns; Environment = @{ GGML_VK_DISABLE_MMVQ='1'; GGML_VK_PTQ1_MMV_WG="$MmvWorkgroup"; GGML_VK_PTQ1_MMV_ROWS="$MmvRows"; GGML_VK_A750_FWHT_WG="$FwhtWorkgroup"; GGML_VK_A750_SUBMIT_DIVISOR="$SubmitDivisor"; GGML_VK_MAX_NODES_PER_SUBMIT="$MaxNodesPerSubmit" } }
+    [pscustomobject]@{ PID = $proc.Id; ContextSize = $ContextSize; HostAddress = $HostAddress; Port = $Port; Server = $server; StdoutLog = $stdout; StderrLog = $stderr; CpuEmbedding = [bool]$CpuEmbedding; MmvWorkgroup = $MmvWorkgroup; MmvRows = $MmvRows; FwhtWorkgroup = $FwhtWorkgroup; SubmitDivisor = $SubmitDivisor; MaxNodesPerSubmit = $MaxNodesPerSubmit; HybridFwht = [bool]$HybridFwht; FuseSigns = [bool]$FuseSigns; Environment = @{ GGML_VK_DISABLE_MMVQ='1'; GGML_VK_PTQ1_MMV_WG="$MmvWorkgroup"; GGML_VK_PTQ1_MMV_ROWS="$MmvRows"; GGML_VK_A750_FWHT_WG="$FwhtWorkgroup"; GGML_VK_A750_SUBMIT_DIVISOR="$SubmitDivisor"; GGML_VK_MAX_NODES_PER_SUBMIT="$MaxNodesPerSubmit" } }
 }
 finally {
     foreach ($name in $old.Keys) {

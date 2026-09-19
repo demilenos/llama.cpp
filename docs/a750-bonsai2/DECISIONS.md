@@ -151,3 +151,9 @@ Report PP graph-buffer delta separately from total dedicated VRAM: matched PP256
 ## 2026-09-19: measurement archive, deletion pending specific approval
 
 User requested final archival and deletion of measurement originals for later Alchemist reverse engineering. Created archives/alchemist-bonsai2-measurements-20260919-100758.zip (136.05 MiB,355 source files); verified CRC and every file SHA256/size. Original measurements remain intact. Automatic approval review rejected deletion across pp-fix/logs/probe-four/versioned evidence because scope was insufficiently specific. Exact proposal287 files/493.82 MiB is recorded in the adjacent receipt. Preserve current live logs, launch metadata, model, code, fixtures and binaries. Archive helper is copy/verify only and performs no deletion. See ARCHIVE.md.
+
+## 2026-09-19: bind address changed
+
+- Restarted the server with only the listener address changed from 127.0.0.1 to 0.0.0.0. Port remains9931, requested context remains65535 (internal n_ctx_slot65536), Q8 K/V, CPU token embedding and the adopted Vulkan tuning are unchanged.
+- Verification: listener LocalAddress=0.0.0.0, PID3168, health=ok. Full-use VRAM headroom at context65535 remains unmeasured; the prior 48384 gate must not be reused as proof for 65535.
+- Versioned launcher now accepts -HostAddress and defaults its context to65535; the reproducibility command uses -HostAddress 0.0.0.0.

@@ -15,12 +15,12 @@ The signed WG64/rows4 configuration meets the measured decode targets:
 
 The CPU embedding comparison shows no observed decode loss and is retained for VRAM optimization. Seven numeric tests and the 33-case whole-graph signed-Hadamard validation pass. The quality proxy uses Q8 KV, ubatch 1, four WikiText2 chunks: PPL 7.941728 versus baseline 7.955312, ratio 0.998293. This is a bounded proxy and does not certify broad model capability.
 
-Server memory evidence is still context-sensitive. Context 48640 with a 2057-token prompt and 1024 generated tokens measured 15.282001 tok/s with 521.50 MiB reserve. Context 48896 measured 15.288034 tok/s with 512.74 MiB reserve, but a 4096-word probe left only 500.27 MiB, so full-use acceptance is rejected. Context 49152 left 503.97 MiB and is rejected. Context 41472 passed a near-full probe (41225 input + 128 generation): peak 7301.89 MiB, reserve 796.11 MiB, decode 11.31 tok/s. Adopted context 48384 passed all sequential stress probes in the same server: 48137 input +128 generation left 530.27 MiB; 2057+1024 left 522.29 MiB; 4105+128 left 517.46 MiB. The server remains on 127.0.0.1:9931 (PID4068), Q8_0 K/V, CPU token embedding and all transformer layers on GPU. Health and OpenAI chat completion smoke checks passed. Long-context throughput is lower than the TG benchmarks above.
+Server memory evidence is still context-sensitive. Context 48640 with a 2057-token prompt and 1024 generated tokens measured 15.282001 tok/s with 521.50 MiB reserve. Context 48896 measured 15.288034 tok/s with 512.74 MiB reserve, but a 4096-word probe left only 500.27 MiB, so full-use acceptance is rejected. Context 49152 left 503.97 MiB and is rejected. Context 41472 passed a near-full probe (41225 input + 128 generation): peak 7301.89 MiB, reserve 796.11 MiB, decode 11.31 tok/s. The current server is bound to 0.0.0.0:9931 (PID3168) with requested context65535 (internal slot65536), Q8_0 K/V, CPU token embedding and all transformer layers on GPU. Health check passed after restart. The earlier 48384 memory stress evidence remains the last measured VRAM gate; 65535 has not yet had a full-use VRAM stress probe. Long-context throughput is lower than the TG benchmarks above.
 
 The versioned launcher is `scripts/a750-bonsai2/start-server.ps1`. Example invocation:
 
 ```powershell
-.\scripts\a750-bonsai2\start-server.ps1 -WorkspaceRoot C:\AI\bonsai2_27b -CpuEmbedding
+.\scripts\a750-bonsai2\start-server.ps1 -WorkspaceRoot C:\AI\bonsai2_27b -HostAddress 0.0.0.0 -ContextSize 65535 -CpuEmbedding
 ```
 
 The adopted environment is: `GGML_VK_DISABLE_MMVQ=1`, `GGML_VK_PTQ1_MMV_WG=64`, `GGML_VK_PTQ1_MMV_ROWS=4`, `GGML_VK_A750_FWHT_SHMEM=1`, `GGML_VK_A750_FWHT_WG=256`, `GGML_VK_A750_FWHT_HYBRID=1`, `GGML_VK_A750_FWHT_SIGNS=1`, `GGML_VK_A750_SUBMIT_DIVISOR=16`, and `GGML_VK_MAX_NODES_PER_SUBMIT=256`. Production diagnostics and conflicting experimental overrides are cleared: `GGML_VK_PTQ1_FORCE_XMX`, `GGML_VK_SERIALIZE_SUBMISSIONS`, `GGML_VK_PTQ1_TILE`, `GGML_VK_PERF_LOGGER`, and `GGML_VK_PTQ1_PROBE`, `GGML_VK_DISABLE_FUSION`, and `GGML_VK_SUBMIT_TRACE`.
@@ -37,3 +37,5 @@ Final server decode: 15.277944 tok/s for 2057 input +1024 generation; 15.077958 
 The GPU critical-path hypothesis is not established: matvec workgroup tuning gave about7% while submission tuning gave about0.24%. Instrumented per-node timestamps are perturbative and do not distinguish arithmetic, bandwidth or host queue gaps. See DECISIONS.md for the retained reasoning.
 
 The binary build label14c1d20c7 was generated before later source commits, while the tested binary already included their working-tree changes. Full raw memory-probe responses remain under workspace pp-fix; versioned evidence omits repeated prompt/output text and retains timings and memory samples.
+
+The current bind address is intentionally 0.0.0.0 for LAN access. Keep the firewall exposure scoped to the intended network.
