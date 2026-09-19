@@ -177,3 +177,9 @@ User requested final archival and deletion of measurement originals for later Al
 - Re-ran the deterministic 512-token prompt with n_predict=5; validation returned tokens_evaluated=512 and tokens_predicted=5 (content qzqzq).
 - Request scope contains one 512-token prefill graph and five 1-token decode graphs. Top-10 totals are in archives/bonsai2-vulkan-shader-n5-timing-20260919.zip; archive SHA256 is 9BEAA98C23A966B86EB1776A1D441C5A1A066E743DF0D5C9962069323BFF884D and internal hashes verified.
 - Restored baseline ggml-vulkan.dll and source, deleted temporary raw probe files after archive verification, and restarted production on 0.0.0.0:9931 with health=ok.
+
+## 2026-09-19: Bonsai sampling defaults
+
+- Set the Bonsai launcher defaults to temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, and repetition_penalty=1.0.
+- llama-server exposes repetition_penalty through the --repeat-penalty option; the launcher uses that spelling.
+- Restarted the live server with the updated flags: PID 22080, 0.0.0.0:9931, context 65535, health=ok. The launcher change remains intentionally uncommitted.
