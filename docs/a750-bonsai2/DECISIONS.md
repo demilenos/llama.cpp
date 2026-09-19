@@ -143,3 +143,7 @@ Existing source changes and earlier evidence are documented in RESULTS.md. No pr
 - Bench r3 TG12815.864460 and TG102415.687187; quality proxy PPL ratio0.998293, seven numeric tests and33 whole-graph sign cases passed. Proxy is not universal quality certification.
 - Health endpoint returned ok; OpenAI chat completion returned exactly READY. PID4068 remains listening on127.0.0.1:9931. Source binary version label14c1d20c7 predates source commits bab57b4d3/e54f521cb; it was built with their tested working-tree changes. No code changed after the measured build.
 - CUDA-relative utilization50% remains unproven because a matched CUDA measurement/denominator is unavailable. Production PP near78 must not be combined with the separate PP105.87 XMX/serialized result.
+
+## 2026-09-19: memory-budget reporting decision
+
+Report PP graph-buffer delta separately from total dedicated VRAM: matched PP256/512 graph allocations increased0 MiB, but total PP/TG VRAM delta was not measured under matched final conditions. FWHT adds4 KiB/workgroup on-chip shared memory, not VRAM. CPU embedding removes265.23 MiB of GPU model storage. Do not classify existing PP539.52 MiB compute workspace or enlarged KV as tuning-added memory. See MEMORY_BUDGET.md.
